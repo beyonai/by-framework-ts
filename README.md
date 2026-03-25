@@ -72,7 +72,9 @@ await runner.initialize();
 
 const subscription = runner.subscribe(async (msg) => {
     const { sessionId, traceId } = msg.data.header;
-    await emitter.emitChunk(sessionId, traceId, '处理中...', {});
+    await emitter.emitChunk(sessionId, traceId, '处理中...', {
+        contentType: SseMessageType.text,
+    });
 
     // 处理完必须发送一条eventType为APP_STREAM_RESPONSE的事件
     await emitter.emitState(sessionId, traceId, AgentState.COMPLETED, {
@@ -505,6 +507,8 @@ new GatewayDataEmitter(redisClient?: Redis)
 | traceId | `string` | 是 | 追踪 ID |
 | event | `StreamChunkEvent \| string` | 是 | 数据内容（字符串或对象） |
 | options.sourceAgentId | `string` | 否 | 源 Agent ID |
+| options.eventType | `EventType` | 否 | 事件类型 |
+| options.contentType | `string` | 否 | 消息类型，默认`SseMessageType.text` |
 | options.metadata | `Record<string, any>` | 否 | 额外元数据 |
 
 **返回：** `Promise<void>`
@@ -523,6 +527,8 @@ new GatewayDataEmitter(redisClient?: Redis)
 | traceId | `string` | 是 | 追踪 ID |
 | event | `StateChangeEvent \| string` | 是 | 状态值（字符串或对象） |
 | options.sourceAgentId | `string` | 否 | 源 Agent ID |
+| options.eventType | `EventType` | 否 | 事件类型 |
+| options.contentType | `string` | 否 | 消息类型，默认`SseMessageType.text` |
 | options.metadata | `Record<string, any>` | 否 | 额外元数据 |
 
 **返回：** `Promise<void>`

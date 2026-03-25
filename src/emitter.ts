@@ -16,7 +16,8 @@ export interface EmitOptions {
     sourceAgentId?: string;
     messageId?: string;
     metadata?: Record<string, any>;
-    eventType?: string;
+    eventType?: EventType;
+    contentType?: string;
 }
 
 /**
@@ -93,7 +94,6 @@ export class GatewayDataEmitter {
             .expire(streamName, RegistryKeys.DEFAULT_SESSION_TTL)
             .exec();
     }
-
     async emitChunk(sessionId: string, traceId: string, event: StreamChunkEvent | string, options: EmitOptions = {}): Promise<void> {
         const chunkEvent = typeof event === 'string' ? { content: event } : event;
         await this.emitEvent({
@@ -105,7 +105,7 @@ export class GatewayDataEmitter {
             data: this._buildSseLayout(
                 chunkEvent.content,
                 chunkEvent.role ?? 'assistant',
-                SseMessageType.text,
+                options.contentType || SseMessageType.text,
                 options.sourceAgentId || '',
                 chunkEvent.function_call,
                 chunkEvent.tool_calls
@@ -122,7 +122,12 @@ export class GatewayDataEmitter {
             eventType: options.eventType || EventType.REASONING_LOG_DELTA,
             sourceAgentId: options.sourceAgentId,
             messageId: options.messageId,
-            data: this._buildSseLayout(stateMsg, null, SseReasonMessageType.think_title, options.sourceAgentId || ''),
+            data: this._buildSseLayout(
+                stateMsg,
+                null,
+                options.contentType || SseReasonMessageType.think_title,
+                options.sourceAgentId || ''
+            ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
     }
