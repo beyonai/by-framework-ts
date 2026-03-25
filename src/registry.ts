@@ -1,0 +1,199 @@
+import { v4 as uuidv4 } from 'uuid';
+import { Redis } from 'ioredis';
+import { getRedis } from './redis_client';
+import { RegistryKeys } from './constants';
+
+export class WorkerRegistry {
+    private redis: Redis;
+    private readonly REGISTRY_KEY = 'gateway:worker_registry';
+    private lockTokens: Map<string, string> = new Map();
+
+    constructor(redisClient?: Redis) {
+        this.redis = redisClient || getRedis();
+    }
+
+    async registerWorker(workerId: string, capabilities: string[]): Promise<void> {
+        const now = Date.now();
+        await this.redis.zadd(RegistryKeys.ACTIVE_WORKERS, now.toString(), workerId);
+        for (const capability of capabilities) {
+            await this.redis.sadd(RegistryKeys.worker_capabilities(workerId), capability);
+            await this.redis.sadd(RegistryKeys.capability_workers(capability), workerId);
+        }
+    }
+
+    async unregisterWorker(workerId: string): Promise<void> {
+        const capabilities = await this.redis.smembers(RegistryKeys.worker_capabilities(workerId));
+        await this.redis.zrem(RegistryKeys.ACTIVE_WORKERS, workerId);
+        await this.redis.del(RegistryKeys.worker_capabilities(workerId));
+        for (const capability of capabilities) {
+            await this.redis.srem(RegistryKeys.capability_workers(capability), workerId);
+        }
+    }
+
+    async getTargetWorker(agentId: string): Promise<string | null> {
+        const workers = await this.redis.smembers(RegistryKeys.capability_workers(agentId));
+        if (!workers || workers.length === 0) {
+            return null;
+        }
+        const randomIndex = Math.floor(Math.random() * workers.length);
+        return workers[randomIndex];
+    }
+
+    // Maintaining these for compatibility with current TS tests, but they now use the new keys
+    async getWorker(workerId: string): Promise<any | null> {
+        const score = await this.redis.zscore(RegistryKeys.ACTIVE_WORKERS, workerId);
+        if (score === null) return null;
+        const capabilities = await this.redis.smembers(RegistryKeys.worker_capabilities(workerId));
+        return {
+            capabilities,
+            last_seen: parseInt(score),
+        };
+    }
+
+    async getAllWorkers(): Promise<Record<string, any>> {
+        const workerIds = await this.redis.zrange(RegistryKeys.ACTIVE_WORKERS, 0, -1);
+        const result: Record<string, any> = {};
+        for (const id of workerIds) {
+            const data = await this.getWorker(id);
+            if (data) result[id] = data;
+        }
+        return result;
+    }
+
+    async claimWorkerId(workerId: string, ttlSeconds: number = 60): Promise<string> {
+        const token = uuidv4().replace(/-/g, '');
+        const key = RegistryKeys.worker_lock(workerId);
+
+        const ok = await this.redis.set(key, token, 'EX', ttlSeconds, 'NX');
+        if (!ok) {
+            throw new Error(`worker_id already in use: ${workerId}`);
+        }
+        this.lockTokens.set(workerId, token);
+        return token;
+    }
+
+    async refreshWorkerIdLock(workerId: string, ttlSeconds: number = 60): Promise<boolean> {
+        const token = this.lockTokens.get(workerId);
+        if (!token) return false;
+
+        const key = RegistryKeys.worker_lock(workerId);
+        const current = await this.redis.get(key);
+        if (current !== token) return false;
+
+        const res = await this.redis.expire(key, ttlSeconds);
+        return res === 1;
+    }
+
+    async releaseWorkerId(workerId: string, token?: string): Promise<boolean> {
+        const expected = token || this.lockTokens.get(workerId);
+        if (!expected) return false;
+
+        const key = RegistryKeys.worker_lock(workerId);
+        const current = await this.redis.get(key);
+        if (current !== expected) return false;
+
+        await this.redis.del(key);
+        this.lockTokens.delete(workerId);
+        return true;
+    }
+
+    async saveExecution(execution: Record<string, any>): Promise<void> {
+        const executionId = String(execution.execution_id);
+        const messageId = String(execution.message_id);
+        const sessionId = String(execution.session_id);
+        const regKey = RegistryKeys.session_registry(sessionId);
+        const encodedData = JSON.stringify(execution);
+
+        await this.redis.pipeline()
+            .hset(regKey, `exec:${executionId}`, encodedData)
+            .hset(regKey, `msg_map:${messageId}`, executionId)
+            .expire(regKey, RegistryKeys.DEFAULT_SESSION_TTL)
+            .exec();
+    }
+
+    async getExecution(executionId: string, sessionId?: string): Promise<Record<string, any> | null> {
+        if (!sessionId) {
+            return null;
+        }
+        const regKey = RegistryKeys.session_registry(sessionId);
+        const data = await this.redis.hget(regKey, `exec:${executionId}`);
+        if (!data) {
+            return null;
+        }
+        return JSON.parse(data);
+    }
+
+    async getExecutionByMessageId(messageId: string, sessionId?: string): Promise<Record<string, any> | null> {
+        if (!sessionId) return null;
+        const regKey = RegistryKeys.session_registry(sessionId);
+        const executionId = await this.redis.hget(regKey, `msg_map:${messageId}`);
+        if (!executionId) {
+            return null;
+        }
+        return this.getExecution(executionId, sessionId);
+    }
+
+    async markExecutionCancelling(executionId: string, sessionId: string, reason: string): Promise<void> {
+        const current = await this.getExecution(executionId, sessionId);
+        if (!current) {
+            return;
+        }
+
+        current.status = 'CANCELLING';
+        current.cancel_requested = true;
+        current.cancel_reason = reason;
+        current.updated_at = Date.now();
+
+        const regKey = RegistryKeys.session_registry(sessionId);
+        await this.redis.pipeline()
+            .hset(regKey, `exec:${executionId}`, JSON.stringify(current))
+            .expire(regKey, RegistryKeys.DEFAULT_SESSION_TTL)
+            .exec();
+    }
+
+    async markExecutionFinished(executionId: string, sessionId: string, status: string): Promise<void> {
+        const current = await this.getExecution(executionId, sessionId);
+        if (!current) {
+            return;
+        }
+
+        current.status = status;
+        current.finished_at = Date.now();
+        current.updated_at = current.finished_at;
+
+        const regKey = RegistryKeys.session_registry(sessionId);
+        await this.redis.pipeline()
+            .hset(regKey, `exec:${executionId}`, JSON.stringify(current))
+            .expire(regKey, RegistryKeys.DEFAULT_SESSION_TTL)
+            .exec();
+    }
+
+    private encodeExecution(execution: Record<string, any>): Record<string, string> {
+        const encoded: Record<string, string> = {};
+        for (const [key, value] of Object.entries(execution)) {
+            if (typeof value === 'boolean') {
+                encoded[key] = value ? '1' : '0';
+            } else {
+                encoded[key] = String(value);
+            }
+        }
+        return encoded;
+    }
+
+    private decodeExecution(execution: Record<string, string>): Record<string, any> {
+        const decoded: Record<string, any> = {};
+        const intFields = new Set(['created_at', 'started_at', 'finished_at', 'updated_at']);
+        const boolFields = new Set(['cancel_requested']);
+
+        for (const [key, value] of Object.entries(execution)) {
+            if (boolFields.has(key)) {
+                decoded[key] = value === '1' || value === 'true' || value === 'True';
+            } else if (intFields.has(key) && /^\d+$/.test(value)) {
+                decoded[key] = Number(value);
+            } else {
+                decoded[key] = value;
+            }
+        }
+        return decoded;
+    }
+}
