@@ -21,8 +21,8 @@ export class GatewayProcessor {
     async process(command: GatewayCommand, handler: ContextHandler): Promise<any> {
         const traceId = command.header.traceId || uuidv4().replace(/-/g, '');
         const isAgentReturn = command instanceof ResumeCommand;
-        const sourceAgentId = command.header.sourceAgentId;
-        const hasSourceAgent = !!sourceAgentId && !isAgentReturn;
+        const sourceAgentType = command.header.sourceAgentType;
+        const hasSourceAgent = !!sourceAgentType && !isAgentReturn;
 
         const context = new AgentContext(
             command.header.sessionId,
@@ -43,7 +43,7 @@ export class GatewayProcessor {
 
             if (hasSourceAgent) {
                 await this.enqueueCallback(command, 'SUCCESS', result);
-                await context.emitState({ state: `${AgentState.QUEUED}: ${sourceAgentId}` });
+                await context.emitState({ state: `${AgentState.QUEUED}: ${sourceAgentType}` });
             } else {
                 await context.emitState({ state: AgentState.COMPLETED });
             }
@@ -63,8 +63,8 @@ export class GatewayProcessor {
         const header = originalCommand.header;
         const callbackMsg = new ResumeCommand(
             new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId || uuidv4().replace(/-/g, ''), {
-                sourceAgentId: header.targetAgentType || this.workerId,
-                targetAgentType: header.sourceAgentId || '',
+                sourceAgentType: header.targetAgentType || this.workerId,
+                targetAgentType: header.sourceAgentType || '',
                 parentMessageId: header.messageId,
             }),
             '',

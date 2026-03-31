@@ -171,7 +171,7 @@ new GatewayClient(registry?: WorkerRegistry, redisClient?: Redis)
 | params.targetAgentType | `string` | 是 | 目标 Worker 类型 |
 | params.sessionId | `string` | 是 | 会话 ID |
 | params.content | `string \| BaiYingMessage \| BaiYingMessage[]` | 是 | 消息内容 |
-| params.sourceAgentId | `string` | 否 | 源 Agent ID |
+| params.sourceAgentType | `string` | 否 | 源 Agent ID |
 | params.traceId | `string` | 否 | 追踪 ID，自动生成 |
 | params.tenantId | `string` | 否 | 租户 ID |
 | params.actionType | `ActionType` | 否 | 动作类型 |
@@ -506,7 +506,7 @@ new GatewayDataEmitter(redisClient?: Redis)
 | sessionId | `string` | 是 | 会话 ID |
 | traceId | `string` | 是 | 追踪 ID |
 | event | `StreamChunkEvent \| string` | 是 | 数据内容（字符串或对象） |
-| options.sourceAgentId | `string` | 否 | 源 Agent ID |
+| options.sourceAgentType | `string` | 否 | 源 Agent ID |
 | options.eventType | `EventType` | 否 | 事件类型 |
 | options.contentType | `string` | 否 | 消息类型，默认`SseMessageType.text` |
 | options.metadata | `Record<string, any>` | 否 | 额外元数据 |
@@ -526,7 +526,7 @@ new GatewayDataEmitter(redisClient?: Redis)
 | sessionId | `string` | 是 | 会话 ID |
 | traceId | `string` | 是 | 追踪 ID |
 | event | `StateChangeEvent \| string` | 是 | 状态值（字符串或对象） |
-| options.sourceAgentId | `string` | 否 | 源 Agent ID |
+| options.sourceAgentType | `string` | 否 | 源 Agent ID |
 | options.eventType | `EventType` | 否 | 事件类型 |
 | options.contentType | `string` | 否 | 消息类型，默认`SseMessageType.text` |
 | options.metadata | `Record<string, any>` | 否 | 额外元数据 |
@@ -546,7 +546,7 @@ new GatewayDataEmitter(redisClient?: Redis)
 | sessionId | `string` | 是 | 会话 ID |
 | traceId | `string` | 是 | 追踪 ID |
 | event | `ArtifactEvent \| string` | 是 | 产物 URL（字符串或对象） |
-| options.sourceAgentId | `string` | 否 | 源 Agent ID |
+| options.sourceAgentType | `string` | 否 | 源 Agent ID |
 | options.metadata | `Record<string, any>` | 否 | 额外元数据 |
 
 **返回：** `Promise<void>`
@@ -564,7 +564,7 @@ new GatewayDataEmitter(redisClient?: Redis)
 | sessionId | `string` | 是 | 会话 ID |
 | traceId | `string` | 是 | 追踪 ID |
 | event | `AskUserEvent \| string` | 是 | 提示内容（字符串或对象） |
-| options.sourceAgentId | `string` | 否 | 源 Agent ID |
+| options.sourceAgentType | `string` | 否 | 源 Agent ID |
 | options.metadata | `Record<string, any>` | 否 | 额外元数据 |
 
 **返回：** `Promise<void>`

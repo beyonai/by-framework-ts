@@ -14,7 +14,7 @@ interface SendMessageParams {
     readonly targetAgentType: string;
     readonly sessionId: string;
     readonly content: string | BaiYingMessage | ReadonlyArray<BaiYingMessage>;
-    readonly sourceAgentId?: string;
+    readonly sourceAgentType?: string;
     readonly traceId?: string;
     readonly tenantId?: string;
     readonly actionType?: ActionType;
@@ -208,7 +208,7 @@ export class GatewayClient {
         }
 
         const header = new MessageHeader(messageId, params.sessionId, traceId, {
-            sourceAgentId: params.sourceAgentId || '',
+            sourceAgentType: params.sourceAgentType || '',
             targetAgentType: params.targetAgentType,
             parentMessageId: params.parentMessageId || '',
             tenantId: params.tenantId || '',

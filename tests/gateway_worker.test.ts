@@ -147,7 +147,7 @@ describe('GatewayWorker', () => {
 
         const command = new AskAgentCommand(
             new MessageHeader('msg-5', 'sess-5', 'trace-5', {
-                sourceAgentId: 'caller-agent',
+                sourceAgentType: 'caller-agent',
                 targetAgentType: 'test-agent',
             }),
             'callback test'
@@ -202,7 +202,7 @@ describe('GatewayWorker', () => {
 
         const command = new AskAgentCommand(
             new MessageHeader('msg-7', 'sess-7', 'trace-7', {
-                sourceAgentId: 'parent-agent',
+                sourceAgentType: 'parent-agent',
                 targetAgentType: 'test-agent',
             }),
             'cancellable task'

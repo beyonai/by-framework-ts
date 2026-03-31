@@ -40,7 +40,7 @@ describe('GatewayProcessor', () => {
 
         const command = new AskAgentCommand(
             new MessageHeader('msg-1', 'sess-1', 'trace-1', {
-                sourceAgentId: 'agent-a',
+                sourceAgentType: 'agent-a',
                 targetAgentType: 'agent-b',
             }),
             'do something'
@@ -90,7 +90,7 @@ describe('GatewayProcessor', () => {
 
         const command = new AskAgentCommand(
             new MessageHeader('msg-3', 'sess-3', 'trace-3', {
-                sourceAgentId: 'caller-agent',
+                sourceAgentType: 'caller-agent',
                 targetAgentType: 'failing-agent',
             }),
             'fail task'

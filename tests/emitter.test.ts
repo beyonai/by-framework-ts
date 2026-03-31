@@ -44,7 +44,7 @@ describe('GatewayDataEmitter', () => {
             sessionId: 'sess-1',
             traceId: 'trace-1',
             eventType: 'custom_event',
-            sourceAgentId: 'agent-a',
+            sourceAgentType: 'agent-a',
             messageId: 'msg-1',
         });
 
@@ -62,7 +62,7 @@ describe('GatewayDataEmitter', () => {
 
     test('emitChunk uses ANSWER_DELTA event type and SSE layout', async () => {
         await emitter.emitChunk('sess-1', 'trace-1', 'hello world', {
-            sourceAgentId: 'agent-a',
+            sourceAgentType: 'agent-a',
             messageId: 'msg-1',
         });
 
@@ -97,7 +97,7 @@ describe('GatewayDataEmitter', () => {
 
     test('emitState uses REASONING_LOG_DELTA and 3003 content type', async () => {
         await emitter.emitState('sess-1', 'trace-1', 'PROCESSING', {
-            sourceAgentId: 'agent-b',
+            sourceAgentType: 'agent-b',
         });
 
         const payload = JSON.parse(redis.calls[0].payload);
@@ -142,7 +142,7 @@ describe('GatewayDataEmitter', () => {
 
     test('askUser sends user input form', async () => {
         await emitter.askUser('sess-1', 'trace-1', 'What is your name?', {
-            sourceAgentId: 'agent-c',
+            sourceAgentType: 'agent-c',
         });
 
         const payload = JSON.parse(redis.calls[0].payload);

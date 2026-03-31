@@ -82,7 +82,7 @@ async function main() {
         try {
             // 使用 atomic emitter 发送回复
             await emitter.emitChunk(sessionId, traceId, "Pub/Sub 模式收到任务，正在处理...", {
-                sourceAgentId: workerId
+                sourceAgentType: workerId
             });
 
             // 模拟流式业务逻辑处理（在循环中输出数据并支持信号中断）
@@ -95,7 +95,7 @@ async function main() {
 
                 const chunkContent = `这是第 ${i} 条流式数据内容...`;
                 await emitter.emitChunk(sessionId, traceId, chunkContent, {
-                    sourceAgentId: workerId
+                    sourceAgentType: workerId
                 });
 
                 console.log(`    已发送数据块 ${i}/20`);
@@ -104,7 +104,7 @@ async function main() {
             }
 
             await emitter.emitState(sessionId, traceId, AgentState.COMPLETED, {
-                sourceAgentId: workerId
+                sourceAgentType: workerId
             });
 
             // 更新状态为已完成
@@ -115,7 +115,7 @@ async function main() {
                 console.log(`[!] 任务 ${messageId} 已中断`);
                 // 发送终态 CANCELLED
                 await emitter.emitState(sessionId, traceId, AgentState.CANCELLED, {
-                    sourceAgentId: workerId
+                    sourceAgentType: workerId
                 });
                 await registry.markExecutionFinished(executionId, sessionId, AgentState.CANCELLED);
             } else {
@@ -146,7 +146,7 @@ async function main() {
 
             // 异步发送 CANCELLING 状态，不阻塞信号监听
             emitter.emitState(taskInfo.sessionId, taskInfo.traceId, AgentState.CANCELLING, {
-                sourceAgentId: workerId
+                sourceAgentType: workerId
             }).catch(e => console.error("发送 CANCELLING 状态失败:", e));
 
             console.log(`    中止信号已发出`);

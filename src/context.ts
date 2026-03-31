@@ -112,7 +112,7 @@ export class AgentContext {
         await this.emitter.emitEvent({
             sessionId: this.sessionId,
             traceId: this.traceId,
-            sourceAgentId: this.currentAgentType,
+            sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
             ...params
         });
@@ -124,7 +124,7 @@ export class AgentContext {
             this.responseBuffer = [...this.responseBuffer, content];
         }
         await this.emitter.emitChunk(this.sessionId, this.traceId, event, {
-            sourceAgentId: this.currentAgentType,
+            sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
             eventType
         });
@@ -135,7 +135,7 @@ export class AgentContext {
 
     async emitState(event: StateChangeEvent | string, eventType?: string): Promise<void> {
         await this.emitter.emitState(this.sessionId, this.traceId, event, {
-            sourceAgentId: this.currentAgentType,
+            sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
             eventType
         });
@@ -143,7 +143,7 @@ export class AgentContext {
 
     async emitArtifact(event: ArtifactEvent | string, eventType?: string): Promise<void> {
         await this.emitter.emitArtifact(this.sessionId, this.traceId, event, {
-            sourceAgentId: this.currentAgentType,
+            sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
             eventType
         });
@@ -151,7 +151,7 @@ export class AgentContext {
 
     async askUser(event: AskUserEvent | string): Promise<{ readonly status: string }> {
         await this.emitter.askUser(this.sessionId, this.traceId, event, {
-            sourceAgentId: this.currentAgentType,
+            sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
         });
         return { status: 'WAITING_USER' };
@@ -181,7 +181,7 @@ export class AgentContext {
 
         const command = new AskAgentCommand(
             new MessageHeader(messageId, this.sessionId, this.traceId, {
-                sourceAgentId: waitForReply ? this.currentAgentType : '',
+                sourceAgentType: waitForReply ? this.currentAgentType : '',
                 targetAgentType: params.targetAgentType,
                 parentMessageId: this.currentMessageId,
             }),
@@ -228,7 +228,7 @@ export class AgentContext {
             const messageId = `msg-${uuidv4().slice(0, 8)}`;
             const command = new AskAgentCommand(
                 new MessageHeader(messageId, this.sessionId, this.traceId, {
-                    sourceAgentId: this.currentAgentType,
+                    sourceAgentType: this.currentAgentType,
                     targetAgentType: task.targetAgentType,
                     parentMessageId: this.currentMessageId,
                     taskGroupId: groupId, // 关键：绑定任务组

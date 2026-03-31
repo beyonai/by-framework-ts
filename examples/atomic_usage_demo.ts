@@ -40,7 +40,7 @@ async function main() {
         // 模拟业务产生了一些流式输出
         const emitter = new GatewayDataEmitter(redis);
         await emitter.emitChunk(data.header.sessionId, data.header.traceId || "", "收到您的请求，正在处理...\n", {
-            sourceAgentId: workerId
+            sourceAgentType: workerId
         });
         console.log("   数据已上报到 Data Stream");
 

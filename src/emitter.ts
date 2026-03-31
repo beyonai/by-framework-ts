@@ -13,7 +13,7 @@ import { SseMessageType, SseReasonMessageType } from './protocol/content_type';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface EmitOptions {
-    sourceAgentId?: string;
+    sourceAgentType?: string;
     messageId?: string;
     metadata?: Record<string, any>;
     eventType?: EventType;
@@ -35,7 +35,7 @@ export class GatewayDataEmitter {
         content: string | null | undefined,
         role: string | null,
         contentType: string,
-        sourceAgentId: string,
+        sourceAgentType: string,
         functionCall?: Record<string, any> | null,
         toolCalls?: Array<Record<string, any>> | null
     ): Record<string, any> {
@@ -45,7 +45,7 @@ export class GatewayDataEmitter {
             model: "",
             object: "",
             contentType,
-            agentId: sourceAgentId || null,
+            agentId: sourceAgentType || null,
             choices: [
                 {
                     index: 0,
@@ -68,7 +68,7 @@ export class GatewayDataEmitter {
         sessionId: string;
         traceId: string;
         eventType: string;
-        sourceAgentId?: string;
+        sourceAgentType?: string;
         messageId?: string;
         data?: Record<string, any>;
         stateMsg?: string;
@@ -79,7 +79,7 @@ export class GatewayDataEmitter {
             trace_id: params.traceId,
             session_id: params.sessionId,
             event_type: params.eventType,
-            source_agent_id: params.sourceAgentId || '',
+            source_agent_id: params.sourceAgentType || '',
             message_id: params.messageId || '',
             timestamp: Date.now(),
             data: params.data || {},
@@ -100,13 +100,13 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: options.eventType || EventType.ANSWER_DELTA,
-            sourceAgentId: options.sourceAgentId,
+            sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
             data: this._buildSseLayout(
                 chunkEvent.content,
                 chunkEvent.role ?? 'assistant',
                 options.contentType || SseMessageType.text,
-                options.sourceAgentId || '',
+                options.sourceAgentType || '',
                 chunkEvent.function_call,
                 chunkEvent.tool_calls
             ),
@@ -120,13 +120,13 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: options.eventType || EventType.REASONING_LOG_DELTA,
-            sourceAgentId: options.sourceAgentId,
+            sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
             data: this._buildSseLayout(
                 stateMsg,
                 null,
                 options.contentType || SseReasonMessageType.think_title,
-                options.sourceAgentId || ''
+                options.sourceAgentType || ''
             ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
@@ -139,9 +139,9 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: options.eventType || EventType.REASONING_LOG_DELTA,
-            sourceAgentId: options.sourceAgentId,
+            sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
-            data: this._buildSseLayout(JSON.stringify(filesPayload), null, SseReasonMessageType.task_create_file, options.sourceAgentId || ''),
+            data: this._buildSseLayout(JSON.stringify(filesPayload), null, SseReasonMessageType.task_create_file, options.sourceAgentType || ''),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
     }
@@ -164,9 +164,9 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: EventType.REASONING_LOG_DELTA,
-            sourceAgentId: options.sourceAgentId,
+            sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
-            data: this._buildSseLayout(JSON.stringify(inputForm), 'assistant', SseReasonMessageType.task_user_input, options.sourceAgentId || ''),
+            data: this._buildSseLayout(JSON.stringify(inputForm), 'assistant', SseReasonMessageType.task_user_input, options.sourceAgentType || ''),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
     }

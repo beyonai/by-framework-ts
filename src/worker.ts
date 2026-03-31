@@ -98,8 +98,8 @@ export abstract class GatewayWorker {
         context.setAgentConfigs(this.pluginRegistry.agentConfigs);
 
         const isResume = command instanceof ResumeCommand;
-        const sourceAgentId = command.header.sourceAgentId;
-        const hasSourceAgent = !!sourceAgentId && !isResume;
+        const sourceAgentType = command.header.sourceAgentType;
+        const hasSourceAgent = !!sourceAgentType && !isResume;
 
         console.log(`[${this.workerId}] Processing message: ${command.header.messageId}`);
         let workspacePaths: { private: string } | null = null;
@@ -146,7 +146,7 @@ export abstract class GatewayWorker {
 
             if (hasSourceAgent) {
                 await this.enqueueAgentReturn(command, 'SUCCESS', result);
-                await context.emitState({ state: `${AgentState.QUEUED}: ${sourceAgentId}` });
+                await context.emitState({ state: `${AgentState.QUEUED}: ${sourceAgentType}` });
             } else {
                 await context.emitState({ state: AgentState.COMPLETED });
             }
@@ -183,12 +183,12 @@ export abstract class GatewayWorker {
 
     private async enqueueAgentReturn(command: GatewayCommand, status: string, replyData: any): Promise<void> {
         const header = command.header;
-        if (!header.sourceAgentId) return;
+        if (!header.sourceAgentType) return;
 
         const callbackMsg = new ResumeCommand(
             new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId, {
-                sourceAgentId: header.targetAgentType || this.workerId,
-                targetAgentType: header.sourceAgentId,
+                sourceAgentType: header.targetAgentType || this.workerId,
+                targetAgentType: header.sourceAgentType,
                 parentMessageId: header.messageId,
                 taskGroupId: header.taskGroupId, // 关键：透传任务组 ID
                 tenantId: header.tenantId,

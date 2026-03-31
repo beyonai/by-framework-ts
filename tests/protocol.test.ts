@@ -113,7 +113,7 @@ describe('Protocol layer', () => {
     describe('MessageHeader', () => {
         test('toDict produces wire format with snake_case keys', () => {
             const header = new MessageHeader('msg-1', 'sess-1', 'trace-1', {
-                sourceAgentId: 'src-agent',
+                sourceAgentType: 'src-agent',
                 targetAgentType: 'tgt-agent',
                 parentMessageId: 'parent-1',
                 taskGroupId: 'grp-1',
@@ -135,7 +135,7 @@ describe('Protocol layer', () => {
 
         test('fromDict round trips correctly', () => {
             const original = new MessageHeader('msg-1', 'sess-1', 'trace-1', {
-                sourceAgentId: 'src',
+                sourceAgentType: 'src',
                 targetAgentType: 'tgt',
                 metadata: { x: 1 },
             });
@@ -144,7 +144,7 @@ describe('Protocol layer', () => {
             expect(restored.messageId).toBe('msg-1');
             expect(restored.sessionId).toBe('sess-1');
             expect(restored.traceId).toBe('trace-1');
-            expect(restored.sourceAgentId).toBe('src');
+            expect(restored.sourceAgentType).toBe('src');
             expect(restored.targetAgentType).toBe('tgt');
             expect(restored.metadata).toEqual({ x: 1 });
         });
@@ -221,7 +221,7 @@ describe('Protocol layer', () => {
             const original = new AskAgentCommand(
                 new MessageHeader('msg-1', 'sess-1', 'trace-1', {
                     targetAgentType: 'agent-a',
-                    sourceAgentId: 'agent-b',
+                    sourceAgentType: 'agent-b',
                 }),
                 'hello',
                 true,

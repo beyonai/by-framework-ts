@@ -1,5 +1,5 @@
 export interface MessageHeaderOptions {
-    sourceAgentId?: string;
+    sourceAgentType?: string;
     targetAgentType?: string;
     parentMessageId?: string;
     taskGroupId?: string;
@@ -14,7 +14,7 @@ export class MessageHeader {
         public readonly traceId: string,
         options: MessageHeaderOptions = {}
     ) {
-        this.sourceAgentId = options.sourceAgentId || '';
+        this.sourceAgentType = options.sourceAgentType || '';
         this.targetAgentType = options.targetAgentType || '';
         this.parentMessageId = options.parentMessageId || '';
         this.taskGroupId = options.taskGroupId || '';
@@ -22,7 +22,7 @@ export class MessageHeader {
         this.metadata = options.metadata || {};
     }
 
-    public readonly sourceAgentId: string;
+    public readonly sourceAgentType: string;
     public readonly targetAgentType: string;
     public readonly parentMessageId: string;
     public readonly taskGroupId: string;
@@ -34,7 +34,7 @@ export class MessageHeader {
             message_id: this.messageId,
             session_id: this.sessionId,
             trace_id: this.traceId,
-            source_agent_id: this.sourceAgentId,
+            source_agent_id: this.sourceAgentType,
             target_agent_type: this.targetAgentType,
             parent_message_id: this.parentMessageId,
             task_group_id: this.taskGroupId,
@@ -45,7 +45,7 @@ export class MessageHeader {
 
     static fromDict(data: Record<string, any>): MessageHeader {
         return new MessageHeader(data.message_id, data.session_id, data.trace_id, {
-            sourceAgentId: data.source_agent_id || '',
+            sourceAgentType: data.source_agent_id || '',
             targetAgentType: data.target_agent_type || '',
             parentMessageId: data.parent_message_id || '',
             taskGroupId: data.task_group_id || '',
