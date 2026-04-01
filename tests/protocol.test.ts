@@ -88,7 +88,7 @@ describe('Protocol layer', () => {
         });
 
         test('task_group includes groupId', () => {
-            expect(RegistryKeys.task_group('grp-1')).toContain('grp-1');
+            expect(QueueNames.task_group('grp-1')).toContain('grp-1');
         });
 
         test('execution_detail includes executionId', () => {

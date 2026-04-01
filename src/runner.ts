@@ -12,6 +12,7 @@ import { AgentState } from './protocol/agent_state';
 interface RunningExecution {
     executionId: string;
     messageId: string;
+    parentMessageId: string;
     sessionId: string;
     workerId: string;
     abortController: AbortController;
@@ -254,6 +255,7 @@ export class WorkerRunner {
 
             const executionId = String(existingExecution?.execution_id || `exec-${uuidv4().slice(0, 8)}`);
             const cancelReason = String(existingExecution?.cancel_reason || '');
+            const parentMessageId = String(existingExecution?.parent_message_id || data.header.parentMessageId || '');
             const abortController = new AbortController();
             if (existingExecution?.cancel_requested) {
                 abortController.abort(cancelReason || 'task cancelled');
@@ -272,6 +274,7 @@ export class WorkerRunner {
             this.activeExecutions.set(executionId, {
                 executionId,
                 messageId: data.header.messageId,
+                parentMessageId,
                 sessionId: data.header.sessionId,
                 workerId: this.worker.workerId,
                 abortController,
@@ -286,6 +289,7 @@ export class WorkerRunner {
                 await registry.saveExecution({
                     execution_id: executionId,
                     message_id: data.header.messageId,
+                    parent_message_id: parentMessageId,
                     session_id: data.header.sessionId,
                     worker_id: this.worker.workerId,
                     target_agent_type: data.header.targetAgentType,

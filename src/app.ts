@@ -30,6 +30,13 @@ export interface RunWorkerOptions {
     redisClient?: Redis;
 }
 
+/**
+ * Check if a value is a Promise (similar to Python's inspect.isawaitable)
+ */
+function isAwaitable(value: any): value is Promise<void> {
+    return value !== null && typeof value === 'object' && typeof value.then === 'function';
+}
+
 export async function runWorker(
     WorkerClass: new (...args: any[]) => GatewayWorker,
     options: RunWorkerOptions = {}
@@ -65,7 +72,11 @@ export async function runWorker(
         pluginRegistry.registerBundle(plugin);
     }
     if (options.pluginConfigurator) {
-        await options.pluginConfigurator(pluginRegistry);
+        const result = options.pluginConfigurator(pluginRegistry);
+        // Check if result is awaitable (Promise), similar to Python's inspect.isawaitable
+        if (isAwaitable(result)) {
+            await result;
+        }
     }
     if (options.pluginHookTimeoutSeconds) {
         pluginRegistry.applyDefaultHookTimeout(options.pluginHookTimeoutSeconds);
@@ -93,6 +104,14 @@ export async function runWorker(
 
     try {
         await runner.start();
+    } catch (error: unknown) {
+        // Handle cancellation gracefully, similar to Python's asyncio.CancelledError
+        if (error instanceof Error && error.name === 'CancelledError') {
+            console.info('Worker runner stopped by cancellation request');
+        } else {
+            console.error('Error running worker:', error);
+            throw error;
+        }
     } finally {
         await closeRedis();
     }

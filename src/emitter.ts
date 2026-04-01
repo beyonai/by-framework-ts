@@ -15,8 +15,9 @@ import { v4 as uuidv4 } from 'uuid';
 export interface EmitOptions {
     sourceAgentType?: string;
     messageId?: string;
+    parentMessageId?: string;
     metadata?: Record<string, any>;
-    eventType?: EventType;
+    eventType?: EventType | string;
     contentType?: string;
 }
 
@@ -26,9 +27,12 @@ export interface EmitOptions {
  */
 export class GatewayDataEmitter {
     private redis: Redis;
+    private fixedDataStreamName?: string;
 
-    constructor(redisClient?: Redis) {
+    constructor(redisClient?: Redis, dataStreamName?: string) {
         this.redis = redisClient || getRedis();
+        // 如果提供了固定的 dataStreamName，则始终使用它（保持兼容性）
+        this.fixedDataStreamName = dataStreamName;
     }
 
     private _buildSseLayout(
@@ -37,7 +41,9 @@ export class GatewayDataEmitter {
         contentType: string,
         sourceAgentType: string,
         functionCall?: Record<string, any> | null,
-        toolCalls?: Array<Record<string, any>> | null
+        toolCalls?: Array<Record<string, any>> | null,
+        orderId?: string,
+        parentOrderId?: string
     ): Record<string, any> {
         return {
             id: uuidv4().replace(/-/g, '').toUpperCase(),
@@ -46,6 +52,8 @@ export class GatewayDataEmitter {
             object: "",
             contentType,
             agentId: sourceAgentType || null,
+            orderId: orderId || null,
+            parentOrderId: parentOrderId || null,
             choices: [
                 {
                     index: 0,
@@ -70,6 +78,7 @@ export class GatewayDataEmitter {
         eventType: string;
         sourceAgentType?: string;
         messageId?: string;
+        parentMessageId?: string;
         data?: Record<string, any>;
         stateMsg?: string;
         artifactUrl?: string;
@@ -81,6 +90,7 @@ export class GatewayDataEmitter {
             event_type: params.eventType,
             source_agent_id: params.sourceAgentType || '',
             message_id: params.messageId || '',
+            parent_message_id: params.parentMessageId || '',
             timestamp: Date.now(),
             data: params.data || {},
             state_msg: params.stateMsg || '',
@@ -88,13 +98,20 @@ export class GatewayDataEmitter {
             metadata: params.metadata || {},
         };
 
-        const streamName = QueueNames.session_data_stream(params.sessionId);
+        // 确定流名称：优先使用 Session 隔离流，除非初始化时指定了固定流名
+        const streamName = this.fixedDataStreamName || QueueNames.session_data_stream(params.sessionId);
         await this.redis.pipeline()
             .xadd(streamName, '*', 'data', JSON.stringify(msg))
             .expire(streamName, RegistryKeys.DEFAULT_SESSION_TTL)
             .exec();
     }
-    async emitChunk(sessionId: string, traceId: string, event: StreamChunkEvent | string, options: EmitOptions = {}): Promise<void> {
+
+    async emitChunk(
+        sessionId: string,
+        traceId: string,
+        event: StreamChunkEvent | string,
+        options: EmitOptions = {}
+    ): Promise<void> {
         const chunkEvent = typeof event === 'string' ? { content: event } : event;
         await this.emitEvent({
             sessionId,
@@ -102,19 +119,27 @@ export class GatewayDataEmitter {
             eventType: options.eventType || EventType.ANSWER_DELTA,
             sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
+            parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
                 chunkEvent.content,
                 chunkEvent.role ?? 'assistant',
                 options.contentType || SseMessageType.text,
                 options.sourceAgentType || '',
                 chunkEvent.function_call,
-                chunkEvent.tool_calls
+                chunkEvent.tool_calls,
+                options.messageId,
+                options.parentMessageId
             ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
     }
 
-    async emitState(sessionId: string, traceId: string, event: StateChangeEvent | string, options: EmitOptions = {}): Promise<void> {
+    async emitState(
+        sessionId: string,
+        traceId: string,
+        event: StateChangeEvent | string,
+        options: EmitOptions = {}
+    ): Promise<void> {
         const stateMsg = typeof event === 'string' ? event : event.state;
         await this.emitEvent({
             sessionId,
@@ -122,17 +147,27 @@ export class GatewayDataEmitter {
             eventType: options.eventType || EventType.REASONING_LOG_DELTA,
             sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
+            parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
                 stateMsg,
                 null,
                 options.contentType || SseReasonMessageType.think_title,
-                options.sourceAgentType || ''
+                options.sourceAgentType || '',
+                null,
+                null,
+                options.messageId,
+                options.parentMessageId
             ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
     }
 
-    async emitArtifact(sessionId: string, traceId: string, event: ArtifactEvent | string, options: EmitOptions = {}): Promise<void> {
+    async emitArtifact(
+        sessionId: string,
+        traceId: string,
+        event: ArtifactEvent | string,
+        options: EmitOptions = {}
+    ): Promise<void> {
         const artifactUrl = typeof event === 'string' ? event : event.url;
         const filesPayload = [{ fileUrl: artifactUrl }];
         await this.emitEvent({
@@ -141,12 +176,27 @@ export class GatewayDataEmitter {
             eventType: options.eventType || EventType.REASONING_LOG_DELTA,
             sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
-            data: this._buildSseLayout(JSON.stringify(filesPayload), null, SseReasonMessageType.task_create_file, options.sourceAgentType || ''),
+            parentMessageId: options.parentMessageId,
+            data: this._buildSseLayout(
+                JSON.stringify(filesPayload),
+                null,
+                SseReasonMessageType.task_create_file,
+                options.sourceAgentType || '',
+                null,
+                null,
+                options.messageId,
+                options.parentMessageId
+            ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
     }
 
-    async askUser(sessionId: string, traceId: string, event: AskUserEvent | string, options: EmitOptions = {}): Promise<void> {
+    async askUser(
+        sessionId: string,
+        traceId: string,
+        event: AskUserEvent | string,
+        options: EmitOptions = {}
+    ): Promise<void> {
         const prompt = typeof event === 'string' ? event : event.prompt;
         const inputForm = {
             formStatus: 0,
@@ -166,7 +216,17 @@ export class GatewayDataEmitter {
             eventType: EventType.REASONING_LOG_DELTA,
             sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
-            data: this._buildSseLayout(JSON.stringify(inputForm), 'assistant', SseReasonMessageType.task_user_input, options.sourceAgentType || ''),
+            parentMessageId: options.parentMessageId,
+            data: this._buildSseLayout(
+                JSON.stringify(inputForm),
+                'assistant',
+                SseReasonMessageType.task_user_input,
+                options.sourceAgentType || '',
+                null,
+                null,
+                options.messageId,
+                options.parentMessageId
+            ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
     }

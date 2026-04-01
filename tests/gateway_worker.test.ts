@@ -160,7 +160,7 @@ describe('GatewayWorker', () => {
 
         const callbackData = JSON.parse(callbackCalls[0].payload);
         expect(callbackData.action_type).toBe(ActionType.RESUME);
-        expect(callbackData.body.status).toBe('SUCCESS');
+        expect(callbackData.body.status).toBe('COMPLETED');
         expect(callbackData.body.reply_data).toBe('result data');
         expect(callbackData.header.target_agent_type).toBe('caller-agent');
         expect(callbackData.header.parent_message_id).toBe('msg-5');

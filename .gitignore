@@ -4,3 +4,4 @@ package-lock.json
 yarn.lock
 .npmrc
 .DS_Store
+.claude/settings.local.json

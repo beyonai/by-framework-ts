@@ -8,6 +8,7 @@ import { AskAgentCommand, BaseCommand, CancelTaskCommand, ResumeCommand } from '
 import { MessageHeader } from './protocol/message_header';
 import { QueueNames } from './constants';
 import { BaiYingMessage } from './protocol/message';
+import { GatewayInterceptor } from './interceptors';
 
 // === Types ===
 interface SendMessageParams {
@@ -26,10 +27,26 @@ interface SendMessageParams {
 export class GatewayClient {
     private readonly redis: Redis;
     private readonly registry: WorkerRegistry;
+    private readonly interceptors: GatewayInterceptor[];
 
-    public constructor(registry?: WorkerRegistry, redisClient?: Redis) {
+    public constructor(registry?: WorkerRegistry, redisClient?: Redis, interceptors?: GatewayInterceptor[]) {
         this.redis = redisClient ?? getRedis();
         this.registry = registry ?? new WorkerRegistry(this.redis);
+        this.interceptors = interceptors ?? [];
+    }
+
+    addInterceptor(interceptor: GatewayInterceptor): void {
+        this.interceptors.push(interceptor);
+    }
+
+    private runInterceptors(params: Record<string, any>): Record<string, any> {
+        let result = params;
+        for (const interceptor of this.interceptors) {
+            if (interceptor.beforeSend) {
+                result = interceptor.beforeSend(result);
+            }
+        }
+        return result;
     }
 
     async sendCommand(command: BaseCommand, streamName?: string): Promise<SendMessageResponse> {
@@ -159,7 +176,19 @@ export class GatewayClient {
     }
 
     async sendMessage(params: SendMessageParams): Promise<SendMessageResponse> {
-        const workerId = await this.registry.getTargetWorker(params.targetAgentType);
+        // Run interceptors before sending
+        let requestParams: Record<string, any> = {
+            targetAgentType: params.targetAgentType,
+            sessionId: params.sessionId,
+            tenantId: params.tenantId || '',
+            content: params.content,
+            actionType: params.actionType || ActionType.ASK_AGENT,
+            parentMessageId: params.parentMessageId || '',
+            payload: params.payload || {},
+        };
+        requestParams = this.runInterceptors(requestParams);
+
+        const workerId = await this.registry.getTargetWorker(requestParams.targetAgentType);
         if (!workerId) {
             return {
                 success: false,
@@ -176,10 +205,10 @@ export class GatewayClient {
 
         // 序列化 content
         let formattedContent: string | unknown[];
-        if (typeof params.content === 'string') {
-            formattedContent = params.content;
+        if (typeof requestParams.content === 'string') {
+            formattedContent = requestParams.content;
         } else {
-            const msgs = Array.isArray(params.content) ? params.content : [params.content];
+            const msgs = Array.isArray(requestParams.content) ? requestParams.content : [requestParams.content];
             formattedContent = msgs.map((m): unknown => {
                 // 如果传入的已经是序列化后的字典格式，不强求实例化
                 if (!m || typeof m !== 'object') {
@@ -207,20 +236,20 @@ export class GatewayClient {
             });
         }
 
-        const header = new MessageHeader(messageId, params.sessionId, traceId, {
+        const header = new MessageHeader(messageId, requestParams.sessionId, traceId, {
             sourceAgentType: params.sourceAgentType || '',
-            targetAgentType: params.targetAgentType,
-            parentMessageId: params.parentMessageId || '',
-            tenantId: params.tenantId || '',
+            targetAgentType: requestParams.targetAgentType,
+            parentMessageId: requestParams.parentMessageId || '',
+            tenantId: requestParams.tenantId || '',
         });
 
-        const payload = params.payload ?? {};
+        const payload = requestParams.payload ?? {};
         const mergedPayload: Record<string, unknown> = {
             ...payload,
             attachments: (payload as { attachments?: unknown[] })?.attachments || []
         };
 
-        const command = (params.actionType || ActionType.ASK_AGENT) === ActionType.RESUME
+        const command = (requestParams.actionType || ActionType.ASK_AGENT) === ActionType.RESUME
             ? new ResumeCommand(
                 header,
                 formattedContent as string | unknown[],

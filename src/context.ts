@@ -126,7 +126,7 @@ export class AgentContext {
         await this.emitter.emitChunk(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
-            eventType
+            eventType: eventType as EventType
         });
         if (eventType === EventType.APP_STREAM_RESPONSE) {
             await this.flushToHistory();
@@ -137,7 +137,7 @@ export class AgentContext {
         await this.emitter.emitState(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
-            eventType
+            eventType: eventType as EventType
         });
     }
 
@@ -145,7 +145,7 @@ export class AgentContext {
         await this.emitter.emitArtifact(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
-            eventType
+            eventType: eventType as EventType
         });
     }
 
@@ -211,7 +211,7 @@ export class AgentContext {
      */
     async dispatchGroup(tasks: ReadonlyArray<{ readonly targetAgentType: string; readonly content: string; readonly payload?: Readonly<Record<string, unknown>> }>): Promise<string> {
         const groupId = `tg-${uuidv4().slice(0, 8)}`;
-        const groupKey = RegistryKeys.task_group(groupId);
+        const groupKey = QueueNames.task_group(groupId);
 
         // 1. 初始化计数器
         await this.redis.hset(groupKey, {

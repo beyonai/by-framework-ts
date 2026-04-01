@@ -27,3 +27,5 @@ export * from './app';
 export * from './interceptors';
 export * from './byai_client';
 export * from './extensions';
+export * from './exceptions';
+export * from './runtime';

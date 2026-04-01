@@ -17,6 +17,7 @@ export interface DataMessage {
     event_type: string;
     source_agent_id?: string;
     message_id?: string;
+    parent_message_id?: string;
     timestamp?: number;
     data?: Record<string, any> | StreamDataPayload;
     state_msg?: string;
