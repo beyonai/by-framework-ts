@@ -39,6 +39,72 @@ export class WorkerRegistry {
         return workers[randomIndex];
     }
 
+    /**
+     * Check if a specific worker is alive (has recent heartbeat).
+     *
+     * @param workerId - Worker ID to check
+     * @param healthThresholdMs - Time threshold in ms to consider worker alive (default 30 seconds)
+     * @returns True if worker is alive, false otherwise
+     */
+    async isWorkerAlive(workerId: string, healthThresholdMs: number = RegistryKeys.SD_DEFAULT_HEALTH_THRESHOLD_MS): Promise<boolean> {
+        const nowMs = Date.now();
+        const minScore = nowMs - healthThresholdMs;
+
+        const activeWorkers = await this.redis.zrangebyscore(
+            RegistryKeys.ACTIVE_WORKERS,
+            minScore.toString(),
+            '+inf'
+        );
+
+        const activeIds = new Set<string>();
+        for (const worker of activeWorkers) {
+            activeIds.add(worker);
+        }
+
+        return activeIds.has(workerId);
+    }
+
+    /**
+     * Check if a capability has any registered and alive workers.
+     *
+     * @param capability - Capability identifier to check
+     * @param checkActive - Whether to check worker active status (default true)
+     * @param healthThresholdMs - Time threshold in ms to consider worker alive (default 30 seconds)
+     * @returns Tuple of [hasCapability, workerIds[]]
+     */
+    async hasCapability(
+        capability: string,
+        checkActive: boolean = true,
+        healthThresholdMs: number = RegistryKeys.SD_DEFAULT_HEALTH_THRESHOLD_MS
+    ): Promise<[boolean, string[]]> {
+        const workers = await this.redis.smembers(RegistryKeys.capability_workers(capability));
+        if (!workers || workers.length === 0) {
+            return [false, []];
+        }
+
+        let workerIds = [...workers];
+
+        if (checkActive) {
+            const nowMs = Date.now();
+            const minScore = nowMs - healthThresholdMs;
+
+            const activeWorkers = await this.redis.zrangebyscore(
+                RegistryKeys.ACTIVE_WORKERS,
+                minScore.toString(),
+                '+inf'
+            );
+
+            const activeIds = new Set<string>();
+            for (const worker of activeWorkers) {
+                activeIds.add(worker);
+            }
+
+            workerIds = workerIds.filter(id => activeIds.has(id));
+        }
+
+        return [workerIds.length > 0, workerIds];
+    }
+
     // Maintaining these for compatibility with current TS tests, but they now use the new keys
     async getWorker(workerId: string): Promise<any | null> {
         const score = await this.redis.zscore(RegistryKeys.ACTIVE_WORKERS, workerId);

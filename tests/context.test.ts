@@ -4,6 +4,11 @@ import { ActionType } from '../src/protocol/action_type';
 
 class MockRedis {
     calls: Array<{ name: string; payload: string }> = [];
+    private storage: Map<string, string> = new Map();
+    private hashStorage: Map<string, Record<string, string>> = new Map();
+    private setStorage: Map<string, string[]> = new Map([
+        ['capability:workers:demo-agent-ts', ['worker-123']],
+    ]);
 
     async xadd(name: string, _id: string, field: string, payload: string): Promise<string> {
         if (field !== 'data') {
@@ -11,6 +16,38 @@ class MockRedis {
         }
         this.calls.push({ name, payload });
         return '1-0';
+    }
+
+    async smembers(key: string): Promise<string[]> {
+        // Match key patterns like "byai_gateway:registry:capability:workers:demo-agent-ts"
+        const matchKey = key.replace(/^byai_gateway:registry:/, '');
+        return this.setStorage.get(matchKey) || [];
+    }
+
+    async hget(key: string, field: string): Promise<string | null> {
+        const hash = this.hashStorage.get(key);
+        return hash ? (hash[field] ?? null) : null;
+    }
+
+    async hset(key: string, mapping: Record<string, string>): Promise<number> {
+        const existing = this.hashStorage.get(key) || {};
+        for (const [k, v] of Object.entries(mapping)) {
+            existing[k] = v;
+        }
+        this.hashStorage.set(key, existing);
+        return 0;
+    }
+
+    async expire(_key: string, _seconds: number): Promise<number> {
+        return 1;
+    }
+
+    async zrangebyscore(_key: string, _min: string, _max: string): Promise<string[]> {
+        return ['worker-123'];
+    }
+
+    async hgetall(key: string): Promise<Record<string, string> | null> {
+        return this.hashStorage.get(key) || null;
     }
 
     pipeline() {

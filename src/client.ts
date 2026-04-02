@@ -2,7 +2,7 @@ import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { getRedis } from './redis_client';
 import { WorkerRegistry } from './registry';
-import { CancelTaskResponse, SendMessageResponse } from './protocol/responses';
+import { CancelTaskResponse, ExecutionStatus, SendMessageResponse } from './protocol/responses';
 import { ActionType } from './protocol/action_type';
 import { AskAgentCommand, BaseCommand, CancelTaskCommand, ResumeCommand } from './protocol/commands';
 import { MessageHeader } from './protocol/message_header';
@@ -22,6 +22,9 @@ interface SendMessageParams {
     readonly payload?: Readonly<Record<string, unknown>>;
     readonly parentMessageId?: string;
     readonly messageId?: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly targetWorkerId?: string;
+    readonly probeCapability?: boolean;
 }
 
 export class GatewayClient {
@@ -58,7 +61,7 @@ export class GatewayClient {
         if (!streamName && command.header.targetAgentType && !targetWorkerId) {
             return {
                 success: false,
-                status: 'FAILED',
+                status: ExecutionStatus.FAILED,
                 message_id: '',
                 trace_id: '',
                 target_worker_id: '',
@@ -93,7 +96,7 @@ export class GatewayClient {
             trace_id: command.header.traceId,
             target_worker_id: targetWorkerId || '',
             timestamp: Date.now(),
-            status: 'QUEUED',
+            status: ExecutionStatus.QUEUED,
         };
     }
 
@@ -112,7 +115,7 @@ export class GatewayClient {
                 message_id: params.messageId,
                 execution_id: '',
                 worker_id: '',
-                status: 'NOT_FOUND',
+                status: ExecutionStatus.NOT_FOUND,
                 timestamp: Date.now(),
                 error: `execution not found for message_id=${params.messageId}`,
             };
@@ -124,7 +127,7 @@ export class GatewayClient {
                 message_id: params.messageId,
                 execution_id: execution.execution_id || '',
                 worker_id: execution.worker_id || '',
-                status: 'NOT_FOUND',
+                status: ExecutionStatus.NOT_FOUND,
                 timestamp: Date.now(),
                 error: `session mismatch for message_id=${params.messageId}`,
             };
@@ -137,7 +140,7 @@ export class GatewayClient {
                 message_id: params.messageId,
                 execution_id: execution.execution_id || '',
                 worker_id: execution.worker_id || '',
-                status: 'ALREADY_FINISHED',
+                status: ExecutionStatus.ALREADY_FINISHED,
                 timestamp: Date.now(),
                 error: `execution already in terminal state: ${executionStatus}`,
             };
@@ -170,12 +173,14 @@ export class GatewayClient {
             message_id: params.messageId,
             execution_id: executionId,
             worker_id: workerId,
-            status: 'CANCEL_REQUESTED',
+            status: ExecutionStatus.CANCEL_REQUESTED,
             timestamp: Date.now(),
         };
     }
 
     async sendMessage(params: SendMessageParams): Promise<SendMessageResponse> {
+        const probeCapability = params.probeCapability ?? true;
+
         // Run interceptors before sending
         let requestParams: Record<string, any> = {
             targetAgentType: params.targetAgentType,
@@ -185,19 +190,52 @@ export class GatewayClient {
             actionType: params.actionType || ActionType.ASK_AGENT,
             parentMessageId: params.parentMessageId || '',
             payload: params.payload || {},
+            metadata: params.metadata || {},
         };
         requestParams = this.runInterceptors(requestParams);
 
-        const workerId = await this.registry.getTargetWorker(requestParams.targetAgentType);
-        if (!workerId) {
-            return {
-                success: false,
-                status: 'FAILED',
-                message_id: '',
-                trace_id: '',
-                target_worker_id: '',
-                timestamp: Date.now(),
-            };
+        let workerId: string | null = null;
+        let resolvedStreamName: string | undefined;
+
+        // 3. Resolve worker_id and optionally probe capability
+        if (params.targetWorkerId) {
+            // Verify target worker is alive before sending
+            if (probeCapability) {
+                const isAlive = await this.registry.isWorkerAlive(params.targetWorkerId);
+                if (!isAlive) {
+                    return {
+                        success: false,
+                        status: ExecutionStatus.FAILED,
+                        message_id: '',
+                        trace_id: '',
+                        target_worker_id: params.targetWorkerId,
+                        timestamp: Date.now(),
+                        error: `Target worker '${params.targetWorkerId}' is not alive or not registered`,
+                        error_code: ExecutionStatus.ERR_WORKER_NOT_ALIVE,
+                    };
+                }
+            }
+            workerId = params.targetWorkerId;
+            resolvedStreamName = QueueNames.worker_ctrl_stream(params.targetWorkerId);
+        } else if (probeCapability) {
+            // Probe: check if any worker with the capability exists
+            const [hasCap, workers] = await this.registry.hasCapability(params.targetAgentType);
+            if (!hasCap) {
+                return {
+                    success: false,
+                    status: ExecutionStatus.FAILED,
+                    message_id: '',
+                    trace_id: '',
+                    target_worker_id: '',
+                    timestamp: Date.now(),
+                    error: `No alive worker found with capability '${params.targetAgentType}'`,
+                    error_code: ExecutionStatus.ERR_CAPABILITY_NOT_FOUND,
+                };
+            }
+            workerId = workers[Math.floor(Math.random() * workers.length)];
+        } else {
+            // No probe: send directly to capability stream (worker_id will be resolved later)
+            resolvedStreamName = QueueNames.ctrl_stream(params.targetAgentType);
         }
 
         const messageId = params.messageId || `msg-${uuidv4().slice(0, 8)}`;
@@ -241,6 +279,7 @@ export class GatewayClient {
             targetAgentType: requestParams.targetAgentType,
             parentMessageId: requestParams.parentMessageId || '',
             tenantId: requestParams.tenantId || '',
+            metadata: requestParams.metadata,
         });
 
         const payload = requestParams.payload ?? {};
@@ -264,6 +303,6 @@ export class GatewayClient {
                 Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
             );
 
-        return this.sendCommand(command);
+        return this.sendCommand(command, resolvedStreamName);
     }
 }

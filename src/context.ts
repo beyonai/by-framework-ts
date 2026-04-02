@@ -1,7 +1,8 @@
 import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { QueueNames, RegistryKeys } from './constants';
+import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_TTL_SECONDS } from './constants';
 import { EventType } from './protocol/event_type';
+import { AgentState } from './protocol/agent_state';
 import { AskAgentCommand } from './protocol/commands';
 import { MessageHeader } from './protocol/message_header';
 import {
@@ -29,12 +30,41 @@ interface CancelSignalLegacy {
     readonly reason?: string;
 }
 
+interface CallAgentResult {
+    status: string;
+    messageId: string;
+    parentMessageId?: string;
+    targetAgentType: string;
+    error?: string;
+    error_code?: string;
+}
+
+interface DispatchedTask {
+    message_id: string;
+    target_agent_type: string;
+}
+
+interface DispatchGroupResult {
+    status: string;
+    taskGroupId: string;
+    dispatchedTasks: DispatchedTask[];
+}
+
+interface GroupResult {
+    message_id: string;
+    status: string;
+    reply_data: unknown;
+    content?: string;
+}
+
 export class AgentContext {
     private emitter: GatewayDataEmitter;
     private agentConfigs: ReadonlyArray<AgentConfig> = [];
     private prevAgentConfigs: ReadonlyArray<AgentConfig> = [];
     private responseBuffer: ReadonlyArray<string> = [];
     private historySaved = false;
+    private _isSuspended = false;
+    private _permissionTransferred = false;
 
     constructor(
         public readonly sessionId: string,
@@ -70,6 +100,14 @@ export class AgentContext {
         return this.prevAgentConfigs;
     }
 
+    isSuspended(): boolean {
+        return this._isSuspended;
+    }
+
+    isPermissionTransferred(): boolean {
+        return this._permissionTransferred;
+    }
+
     async callTool(name: string, kwargs: Readonly<Record<string, unknown>> = {}): Promise<unknown> {
         for (const config of this.agentConfigs) {
             const tool = config.tools?.[name];
@@ -100,6 +138,10 @@ export class AgentContext {
         const { WorkerRegistry } = await import('./registry');
         const registry = new WorkerRegistry(this.redis);
         return registry.getAllWorkers() as unknown as Record<string, unknown>;
+    }
+
+    private generateMessageId(): string {
+        return `msg-${uuidv4().slice(0, 8)}`;
     }
 
     private async emitEvent(params: {
@@ -154,7 +196,8 @@ export class AgentContext {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
         });
-        return { status: 'WAITING_USER' };
+        this._isSuspended = true;
+        return { status: AgentState.WAITING_USER };
     }
 
     async flushToHistory(): Promise<void> {
@@ -172,22 +215,55 @@ export class AgentContext {
 
     async callAgent(params: {
         readonly targetAgentType: string;
-        readonly content: string;
+        readonly content: string | Array<Record<string, unknown>>;
         readonly payload?: Readonly<Record<string, unknown>>;
         readonly waitForReply?: boolean;
-    }): Promise<{ readonly status: string; readonly messageId: string; readonly targetAgentType: string }> {
-        const messageId = `msg-${uuidv4().slice(0, 8)}`;
+        readonly metadata?: Readonly<Record<string, unknown>>;
+        readonly messageId?: string;
+        readonly parentMessageId?: string;
+        readonly probeCapability?: boolean;
+    }): Promise<CallAgentResult> {
+        const probeCapability = params.probeCapability ?? true;
+
+        // Probe capability if enabled
+        if (probeCapability) {
+            const { WorkerRegistry } = await import('./registry');
+            const registry = new WorkerRegistry(this.redis);
+            const [hasCap] = await registry.hasCapability(params.targetAgentType, true);
+            if (!hasCap) {
+                return {
+                    status: AgentState.FAILED,
+                    messageId: '',
+                    parentMessageId: params.parentMessageId || this.currentMessageId,
+                    targetAgentType: params.targetAgentType,
+                    error: `No alive worker found with capability '${params.targetAgentType}'`,
+                    error_code: 'CAPABILITY_NOT_FOUND',
+                };
+            }
+        }
+
+        const messageId = params.messageId || this.generateMessageId();
+        const parentMessageId = params.parentMessageId || this.currentMessageId;
         const waitForReply = params.waitForReply ?? true;
+
+        const mergedPayload: Record<string, unknown> = { ...(params.payload || {}) };
+        if (waitForReply) {
+            mergedPayload.wait_for_reply = true;
+            this._isSuspended = true;
+        } else {
+            this._permissionTransferred = true;
+        }
 
         const command = new AskAgentCommand(
             new MessageHeader(messageId, this.sessionId, this.traceId, {
                 sourceAgentType: waitForReply ? this.currentAgentType : '',
                 targetAgentType: params.targetAgentType,
-                parentMessageId: this.currentMessageId,
+                parentMessageId: parentMessageId,
+                metadata: params.metadata,
             }),
-            params.content,
+            params.content as string | unknown[],
             waitForReply,
-            { ...(params.payload || {}) }
+            Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
         );
 
         await this.redis.xadd(
@@ -198,44 +274,78 @@ export class AgentContext {
         );
 
         return {
-            status: 'QUEUED',
+            status: AgentState.QUEUED,
             messageId,
+            parentMessageId,
             targetAgentType: params.targetAgentType,
         };
     }
 
     /**
-     * 并发派发任务组 (Scatter-Gather)
-     * @param tasks 任务列表
-     * @returns 任务组 ID
+     * Dispatch multiple tasks concurrently as a group (Scatter-Gather).
+     *
+     * @param tasks - Array of task objects with targetAgentType, content, payload
+     * @param waitForReply - If true, sets up Redis counters to wait for all
+     * @param messageId - Optional custom message ID
+     * @param parentMessageId - Optional custom parent message ID
+     * @returns DispatchGroupResult with status, taskGroupId, and dispatched tasks
      */
-    async dispatchGroup(tasks: ReadonlyArray<{ readonly targetAgentType: string; readonly content: string; readonly payload?: Readonly<Record<string, unknown>> }>): Promise<string> {
-        const groupId = `tg-${uuidv4().slice(0, 8)}`;
-        const groupKey = QueueNames.task_group(groupId);
+    async dispatchGroup(params: {
+        readonly tasks: ReadonlyArray<{
+            readonly targetAgentType: string;
+            readonly content: string;
+            readonly payload?: Readonly<Record<string, unknown>>;
+            readonly metadata?: Readonly<Record<string, unknown>>;
+        }>;
+        readonly waitForReply?: boolean;
+        readonly messageId?: string;
+        readonly parentMessageId?: string;
+    }): Promise<DispatchGroupResult> {
+        const { tasks, waitForReply = true, messageId, parentMessageId } = params;
 
-        // 1. 初始化计数器
-        await this.redis.hset(groupKey, {
-            total: tasks.length.toString(),
-            completed: '0',
-            source_agent_id: this.currentAgentType || '',
-            parent_message_id: this.currentMessageId || '',
-            trace_id: this.traceId
-        });
-        await this.redis.expire(groupKey, 3600); // 1小时过期
+        if (!tasks || tasks.length === 0) {
+            return { status: 'EMPTY', taskGroupId: '', dispatchedTasks: [] };
+        }
 
-        // 2. 批量派发
+        const taskGroupId = `tg-${uuidv4().slice(0, 8)}`;
+        const wait = waitForReply ?? true;
+
+        // Setup Redis counters if waiting for replies
+        if (wait) {
+            const groupKey = QueueNames.task_group(taskGroupId);
+            await this.redis.hset(groupKey, {
+                [TASK_GROUP_FIELD_TOTAL]: tasks.length.toString(),
+                [TASK_GROUP_FIELD_COMPLETED]: '0',
+                source_agent_type: this.currentAgentType,
+            });
+            await this.redis.expire(groupKey, TASK_GROUP_TTL_SECONDS);
+            this._isSuspended = true;
+        } else {
+            this._permissionTransferred = true;
+        }
+
+        const dispatchedTasks: DispatchedTask[] = [];
+
         for (const task of tasks) {
-            const messageId = `msg-${uuidv4().slice(0, 8)}`;
+            const currentMessageId = this.generateMessageId();
+            const currentParentMessageId = parentMessageId || this.currentMessageId;
+
+            const mergedPayload: Record<string, unknown> = { ...(task.payload || {}) };
+            if (wait) {
+                mergedPayload.wait_for_reply = true;
+            }
+
             const command = new AskAgentCommand(
-                new MessageHeader(messageId, this.sessionId, this.traceId, {
-                    sourceAgentType: this.currentAgentType,
+                new MessageHeader(currentMessageId, this.sessionId, this.traceId, {
+                    sourceAgentType: wait ? this.currentAgentType : '',
                     targetAgentType: task.targetAgentType,
-                    parentMessageId: this.currentMessageId,
-                    taskGroupId: groupId, // 关键：绑定任务组
+                    parentMessageId: currentParentMessageId,
+                    taskGroupId: taskGroupId,
+                    metadata: task.metadata,
                 }),
                 task.content,
-                true,
-                { ...(task.payload || {}) }
+                wait,
+                Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
             );
 
             await this.redis.xadd(
@@ -244,8 +354,71 @@ export class AgentContext {
                 'data',
                 JSON.stringify(command.toDict())
             );
+
+            dispatchedTasks.push({
+                message_id: currentMessageId,
+                target_agent_type: task.targetAgentType,
+            });
         }
 
-        return groupId;
+        return {
+            status: 'GROUP_QUEUED',
+            taskGroupId,
+            dispatchedTasks,
+        };
+    }
+
+    /**
+     * Collect results from all tasks in a group.
+     *
+     * @param taskGroupId - The task group ID returned by dispatchGroup
+     * @param timeout - Maximum time to wait in seconds (default 30)
+     * @returns Array of results from all completed tasks
+     */
+    async collectGroupResults(taskGroupId: string, timeout: number = 30): Promise<GroupResult[]> {
+        if (!taskGroupId) {
+            return [];
+        }
+
+        const resultsKey = QueueNames.task_group_results(taskGroupId);
+        const groupKey = QueueNames.task_group(taskGroupId);
+
+        const totalStr = await this.redis.hget(groupKey, TASK_GROUP_FIELD_TOTAL);
+        const total = totalStr ? parseInt(totalStr, 10) : Infinity;
+
+        const results: GroupResult[] = [];
+        const startTime = Date.now();
+
+        while (results.length < total) {
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (elapsed >= timeout) {
+                break;
+            }
+
+            const rawResults = await this.redis.hgetall(resultsKey);
+            if (rawResults) {
+                for (const [msgId, data] of Object.entries(rawResults)) {
+                    try {
+                        const parsed = JSON.parse(data as string);
+                        results.push({
+                            message_id: msgId,
+                            status: parsed.status || '',
+                            reply_data: parsed.reply_data,
+                            content: parsed.content,
+                        });
+                    } catch {
+                        // Skip invalid JSON
+                    }
+                }
+                if (results.length >= total) {
+                    break;
+                }
+            }
+
+            // Wait 100ms before polling again
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        return results;
     }
 }

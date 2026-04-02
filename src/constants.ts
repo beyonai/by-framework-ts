@@ -50,6 +50,9 @@ export class RegistryKeys {
   /** Active workers sorted set (sorted by heartbeat timestamp) */
   static ACTIVE_WORKERS = 'byai_gateway:registry:active_workers';
 
+  /** Default health check threshold (30 seconds) in milliseconds */
+  static SD_DEFAULT_HEALTH_THRESHOLD_MS = 30000;
+
   /**
    * Worker capabilities set - stores all capability identifiers supported by a worker.
    */

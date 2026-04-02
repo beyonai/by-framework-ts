@@ -1,3 +1,10 @@
+/**
+ * Response type definitions for Gateway protocol.
+ *
+ * Contains response interfaces and TypedDict definitions for
+ * send message and cancel task operations.
+ */
+
 export interface SendMessageResponse {
     success: boolean;
     message_id: string;
@@ -5,6 +12,8 @@ export interface SendMessageResponse {
     target_worker_id: string;
     timestamp: number;
     status: string;
+    error?: string;
+    error_code?: string;
 }
 
 export interface CancelTaskResponse {
@@ -15,4 +24,25 @@ export interface CancelTaskResponse {
     status: string;
     timestamp: number;
     error?: string;
+}
+
+/**
+ * API response status values for execution operations.
+ */
+export class ExecutionStatus {
+    // Success statuses
+    static readonly SUCCESS = 'SUCCESS';
+    static readonly QUEUED = 'QUEUED';
+    static readonly CANCEL_REQUESTED = 'CANCEL_REQUESTED';
+
+    // Error statuses
+    static readonly NOT_FOUND = 'NOT_FOUND';
+    static readonly ALREADY_FINISHED = 'ALREADY_FINISHED';
+    static readonly FAILED = 'FAILED';
+    static readonly SESSION_MISMATCH = 'SESSION_MISMATCH';
+
+    // Failure error codes for SendMessageResponse
+    static readonly ERR_CAPABILITY_NOT_FOUND = 'CAPABILITY_NOT_FOUND';
+    static readonly ERR_WORKER_NOT_ALIVE = 'WORKER_NOT_ALIVE';
+    static readonly ERR_REGISTRY_NOT_SET = 'REGISTRY_NOT_SET';
 }

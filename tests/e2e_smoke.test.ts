@@ -77,6 +77,14 @@ class MockRegistry {
         return 'worker-e2e';
     }
 
+    async hasCapability(_capability: string, _checkActive?: boolean): Promise<[boolean, string[]]> {
+        return [true, ['worker-e2e']];
+    }
+
+    async isWorkerAlive(_workerId: string): Promise<boolean> {
+        return true;
+    }
+
     async saveExecution(execution: any): Promise<void> {
         this.executionByMessage.set(execution.message_id, { ...execution });
     }
