@@ -53,6 +53,23 @@ export class RegistryKeys {
   /** Default health check threshold (30 seconds) in milliseconds */
   static SD_DEFAULT_HEALTH_THRESHOLD_MS = 30000;
 
+  // --- 服务发现 (Service Discovery) ---
+  /** Active service instances sorted set (sorted by heartbeat timestamp) */
+  static sd_active_instances(serviceName: string): string {
+    return `byai_gateway:sd:active:${serviceName}`;
+  }
+
+  /** Service instance details hash key */
+  static sd_instance_details(serviceName: string): string {
+    return `byai_gateway:sd:instances:${serviceName}`;
+  }
+
+  /** All known service names set */
+  static SD_SERVICES = 'byai_gateway:sd:services';
+
+  /** Default heartbeat interval (10 seconds) */
+  static SD_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10;
+
   /**
    * Worker capabilities set - stores all capability identifiers supported by a worker.
    */
