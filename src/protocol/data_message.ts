@@ -15,7 +15,7 @@ export interface DataMessage {
     trace_id: string;
     session_id: string;
     event_type: string;
-    source_agent_id?: string;
+    source_agent_type?: string;
     message_id?: string;
     parent_message_id?: string;
     timestamp?: number;

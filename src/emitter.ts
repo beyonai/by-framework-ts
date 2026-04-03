@@ -88,7 +88,7 @@ export class GatewayDataEmitter {
             trace_id: params.traceId,
             session_id: params.sessionId,
             event_type: params.eventType,
-            source_agent_id: params.sourceAgentType || '',
+            source_agent_type: params.sourceAgentType || '',
             message_id: params.messageId || '',
             parent_message_id: params.parentMessageId || '',
             timestamp: Date.now(),

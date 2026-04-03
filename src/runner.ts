@@ -141,6 +141,7 @@ export class WorkerRunner {
     async release(): Promise<void> {
         this.controlLoopRunning = false;
         this.worker.stopHeartbeat();
+        this.worker.registry.unregisterWorker(this.worker.workerId);
         if ((this.worker as any).pluginRegistry?.onWorkerShutdown) {
             if (this.worker.pluginRegistry.logHookStatsOnShutdown) {
                 this.worker.pluginRegistry.logHookStats();
