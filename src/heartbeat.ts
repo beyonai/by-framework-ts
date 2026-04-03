@@ -11,7 +11,7 @@ export class WorkerHeartbeat {
         private capabilities: string[],
         private redis: Redis = getRedis(),
         registry?: WorkerRegistry,
-        private intervalMs: number = 30000
+        private intervalMs: number = 10000
     ) {
         this.registry = registry || new WorkerRegistry(this.redis);
     }
