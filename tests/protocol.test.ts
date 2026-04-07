@@ -65,7 +65,7 @@ describe('Protocol layer', () => {
             expect(QueueNames.session_data_stream('sess-1')).toContain('sess-1');
         });
 
-        test('ctrl_stream includes capability', () => {
+        test('ctrl_stream includes agentType', () => {
             expect(QueueNames.ctrl_stream('agent-x')).toContain('agent-x');
         });
 
@@ -79,12 +79,12 @@ describe('Protocol layer', () => {
             expect(RegistryKeys.ACTIVE_WORKERS).toBeTruthy();
         });
 
-        test('worker_capabilities includes workerId', () => {
-            expect(RegistryKeys.worker_capabilities('w-1')).toContain('w-1');
+        test('worker_declared_agent_types includes workerId', () => {
+            expect(RegistryKeys.workerDeclaredAgentTypes('w-1')).toContain('w-1');
         });
 
-        test('capability_workers includes capability', () => {
-            expect(RegistryKeys.capability_workers('agent-x')).toContain('agent-x');
+        test('agent_type_members includes agentType', () => {
+            expect(RegistryKeys.agentTypeMembers('agent-x')).toContain('agent-x');
         });
 
         test('task_group includes groupId', () => {

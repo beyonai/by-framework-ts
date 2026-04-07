@@ -6,7 +6,7 @@ import {
 } from '../src';
 
 class DemoWorker extends GatewayWorker {
-    getCapabilities(): string[] {
+    getAgentTypes(): string[] {
         return ['demo-agent-ts'];
     }
 

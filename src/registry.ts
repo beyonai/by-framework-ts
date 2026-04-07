@@ -12,26 +12,111 @@ export class WorkerRegistry {
         this.redis = redisClient || getRedis();
     }
 
-    async registerWorker(workerId: string, capabilities: string[]): Promise<void> {
+    async registerWorker(workerId: string, agentTypes: string[]): Promise<void> {
+        await this.registerWorkerMembership(workerId, agentTypes);
+        await this.heartbeatWorker(workerId);
+    }
+
+    /**
+     * Register worker membership (agent types) without sending heartbeat.
+     * Use this when you want to register separately from heartbeat.
+     */
+    async registerWorkerMembership(workerId: string, agentTypes: string[]): Promise<void> {
+        for (const agentType of agentTypes) {
+            await this.redis.sadd(RegistryKeys.workerDeclaredAgentTypes(workerId), agentType);
+            await this.redis.sadd(RegistryKeys.agentTypeMembers(agentType), workerId);
+        }
+    }
+
+    /**
+     * Send heartbeat for a worker to maintain online status.
+     * Updates both the sorted set timestamp and the lease key.
+     */
+    async heartbeatWorker(workerId: string, leaseTtlSeconds: number = RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS): Promise<void> {
         const now = Date.now();
         await this.redis.zadd(RegistryKeys.ACTIVE_WORKERS, now.toString(), workerId);
-        for (const capability of capabilities) {
-            await this.redis.sadd(RegistryKeys.worker_capabilities(workerId), capability);
-            await this.redis.sadd(RegistryKeys.capability_workers(capability), workerId);
-        }
+        await this.redis.set(
+            RegistryKeys.worker_online_lease(workerId),
+            '1',
+            'EX',
+            leaseTtlSeconds
+        );
     }
 
     async unregisterWorker(workerId: string): Promise<void> {
-        const capabilities = await this.redis.smembers(RegistryKeys.worker_capabilities(workerId));
+        await this.markWorkerInactive(workerId);
+        await this.unregisterWorkerMembership(workerId);
+    }
+
+    /**
+     * Mark worker as inactive (remove lease) without removing membership.
+     */
+    async markWorkerInactive(workerId: string): Promise<void> {
+        await this.redis.del(RegistryKeys.worker_online_lease(workerId));
         await this.redis.zrem(RegistryKeys.ACTIVE_WORKERS, workerId);
-        await this.redis.del(RegistryKeys.worker_capabilities(workerId));
-        for (const capability of capabilities) {
-            await this.redis.srem(RegistryKeys.capability_workers(capability), workerId);
+    }
+
+    /**
+     * Remove worker membership (agent types) without mutating liveness.
+     */
+    async unregisterWorkerMembership(workerId: string): Promise<void> {
+        const agentTypes = await this.redis.smembers(RegistryKeys.workerDeclaredAgentTypes(workerId));
+        await this.redis.del(RegistryKeys.workerDeclaredAgentTypes(workerId));
+        for (const agentType of agentTypes) {
+            await this.redis.srem(RegistryKeys.agentTypeMembers(agentType), workerId);
         }
     }
 
-    async getTargetWorker(agentId: string): Promise<string | null> {
-        const workers = await this.redis.smembers(RegistryKeys.capability_workers(agentId));
+    /**
+     * Get all online workers for a given agent type.
+     */
+    async getOnlineWorkers(agentType: string): Promise<string[]> {
+        const [, workerIds] = await this.hasAgentType(agentType, true);
+        return workerIds;
+    }
+
+    /**
+     * Get a random online worker for a given agent type.
+     */
+    async getRandomOnlineWorker(agentType: string): Promise<string | null> {
+        const workers = await this.getOnlineWorkers(agentType);
+        if (workers.length === 0) {
+            return null;
+        }
+        const randomIndex = Math.floor(Math.random() * workers.length);
+        return workers[randomIndex];
+    }
+
+    /**
+     * Check if a worker is online using lease key.
+     */
+    async isWorkerOnline(workerId: string): Promise<boolean> {
+        const leaseValue = await this.redis.get(RegistryKeys.worker_online_lease(workerId));
+        return leaseValue !== null;
+    }
+
+    /**
+     * Check if an agent type has any registered and online workers.
+     * Uses lease-based online check.
+     */
+    async hasOnlineAgentType(agentType: string): Promise<[boolean, string[]]> {
+        const workers = await this.redis.smembers(RegistryKeys.agentTypeMembers(agentType));
+        if (!workers || workers.length === 0) {
+            return [false, []];
+        }
+
+        const onlineWorkerIds: string[] = [];
+        for (const workerId of workers) {
+            if (await this.isWorkerOnline(workerId)) {
+                onlineWorkerIds.push(workerId);
+            }
+        }
+
+        return [onlineWorkerIds.length > 0, onlineWorkerIds];
+    }
+
+    async getTargetWorker(agentType: string): Promise<string | null> {
+        const workers = await this.redis.smembers(RegistryKeys.agentTypeMembers(agentType));
         if (!workers || workers.length === 0) {
             return null;
         }
@@ -65,19 +150,19 @@ export class WorkerRegistry {
     }
 
     /**
-     * Check if a capability has any registered and alive workers.
+     * Check if an agent type has any registered and alive workers.
      *
-     * @param capability - Capability identifier to check
+     * @param agentType - Agent type identifier to check
      * @param checkActive - Whether to check worker active status (default true)
      * @param healthThresholdMs - Time threshold in ms to consider worker alive (default 30 seconds)
-     * @returns Tuple of [hasCapability, workerIds[]]
+     * @returns Tuple of [hasAgentType, workerIds[]]
      */
-    async hasCapability(
-        capability: string,
+    async hasAgentType(
+        agentType: string,
         checkActive: boolean = true,
         healthThresholdMs: number = RegistryKeys.SD_DEFAULT_HEALTH_THRESHOLD_MS
     ): Promise<[boolean, string[]]> {
-        const workers = await this.redis.smembers(RegistryKeys.capability_workers(capability));
+        const workers = await this.redis.smembers(RegistryKeys.agentTypeMembers(agentType));
         if (!workers || workers.length === 0) {
             return [false, []];
         }
@@ -109,9 +194,9 @@ export class WorkerRegistry {
     async getWorker(workerId: string): Promise<any | null> {
         const score = await this.redis.zscore(RegistryKeys.ACTIVE_WORKERS, workerId);
         if (score === null) return null;
-        const capabilities = await this.redis.smembers(RegistryKeys.worker_capabilities(workerId));
+        const agentTypes = await this.redis.smembers(RegistryKeys.workerDeclaredAgentTypes(workerId));
         return {
-            capabilities,
+            agentTypes,
             last_seen: parseInt(score),
         };
     }

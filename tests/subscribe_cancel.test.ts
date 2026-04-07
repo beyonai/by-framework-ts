@@ -37,7 +37,7 @@ describe('WorkerRunner.subscribeCancel', () => {
         // @ts-ignore
         runner = new WorkerRunner({
             workerId: 'worker-test',
-            getCapabilities: () => ['test-cap'],
+            getAgentTypes: () => ['test-cap'],
             handleMessage: async () => 'SUCCESS'
         }, {
             redisClient: mockRedis as any

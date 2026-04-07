@@ -8,7 +8,7 @@ export class WorkerHeartbeat {
 
     constructor(
         private workerId: string,
-        private capabilities: string[],
+        private agentTypes: string[],
         private redis: Redis = getRedis(),
         registry?: WorkerRegistry,
         private intervalMs: number = 10000
@@ -20,11 +20,11 @@ export class WorkerHeartbeat {
         if (this.intervalId) return;
 
         // Initial registration
-        await this.registry.registerWorker(this.workerId, this.capabilities);
+        await this.registry.registerWorker(this.workerId, this.agentTypes);
 
         this.intervalId = setInterval(async () => {
             try {
-                await this.registry.registerWorker(this.workerId, this.capabilities);
+                await this.registry.registerWorker(this.workerId, this.agentTypes);
             } catch (error) {
                 console.error(`[${this.workerId}] Heartbeat failed:`, error);
             }

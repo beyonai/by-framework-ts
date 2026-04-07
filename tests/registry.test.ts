@@ -123,13 +123,13 @@ describe('WorkerRegistry', () => {
 
     test('should register a worker and retrieve it', async () => {
         const workerId = 'test-worker-01';
-        const capabilities = ['capability-1', 'capability-2'];
+        const agentTypes = ['agent-type-1', 'agent-type-2'];
 
-        await registry.registerWorker(workerId, capabilities);
+        await registry.registerWorker(workerId, agentTypes);
 
         const worker = await registry.getWorker(workerId);
         expect(worker).not.toBeNull();
-        expect(worker.capabilities).toEqual(capabilities);
+        expect(worker.agentTypes).toEqual(agentTypes);
         expect(worker.last_seen).toBeLessThanOrEqual(Date.now());
     });
 
@@ -157,7 +157,7 @@ describe('WorkerRegistry', () => {
         expect(newToken).not.toBe(token);
     });
 
-    test('getTargetWorker returns random worker for capability', async () => {
+    test('getTargetWorker returns random worker for agentType', async () => {
         await registry.registerWorker('w-1', ['agent-x']);
         await registry.registerWorker('w-2', ['agent-x']);
 
@@ -170,8 +170,8 @@ describe('WorkerRegistry', () => {
         expect(result).toBeNull();
     });
 
-    test('unregisterWorker removes worker and capabilities', async () => {
-        await registry.registerWorker('w-1', ['cap-a', 'cap-b']);
+    test('unregisterWorker removes worker and agentTypes', async () => {
+        await registry.registerWorker('w-1', ['agent-a', 'agent-b']);
 
         await registry.unregisterWorker('w-1');
 

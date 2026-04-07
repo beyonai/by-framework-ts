@@ -40,7 +40,7 @@ export class WorkerRunner {
     ]);
 
     constructor(
-        workerOrOptions: GatewayWorker | { workerId: string; capabilities: string[]; registry?: WorkerRegistry },
+        workerOrOptions: GatewayWorker | { workerId: string; agentTypes: string[]; registry?: WorkerRegistry },
         options: {
             redisClient?: Redis;
             groupName?: string;
@@ -53,7 +53,7 @@ export class WorkerRunner {
             const redis = options.redisClient || getRedis();
             this.worker = {
                 workerId: workerOrOptions.workerId,
-                getCapabilities: () => workerOrOptions.capabilities,
+                getAgentTypes: () => workerOrOptions.agentTypes,
                 registry: workerOrOptions.registry || new WorkerRegistry(redis),
                 startHeartbeat: async () => { }, // 原子模式下由用户决定是否启动心跳
                 stopHeartbeat: () => { },
@@ -72,14 +72,14 @@ export class WorkerRunner {
     }
 
     private autoGroupName(): string {
-        const caps = [...this.worker.getCapabilities()].sort();
+        const caps = [...this.worker.getAgentTypes()].sort();
         const payload = caps.join(',');
         const digest = crypto.createHash('sha1').update(payload).digest('hex').substring(0, 10);
         return `${ConsumerGroups.AGENT_ENGINES}:${digest}`;
     }
 
     async setupStreams(): Promise<void> {
-        for (const cap of this.worker.getCapabilities()) {
+        for (const cap of this.worker.getAgentTypes()) {
             const streamName = QueueNames.ctrl_stream(cap);
             try {
                 await this.redis.xgroup(
@@ -174,7 +174,7 @@ export class WorkerRunner {
 
         const streams: string[] = [];
         const ids: string[] = [];
-        for (const cap of this.worker.getCapabilities()) {
+        for (const cap of this.worker.getAgentTypes()) {
             streams.push(QueueNames.ctrl_stream(cap));
             ids.push('>');
         }

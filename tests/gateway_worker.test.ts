@@ -61,7 +61,7 @@ describe('GatewayWorker', () => {
         const r = redis || new MockRedis();
         return new AnonymousWorker({
             workerId: 'test-worker',
-            capabilities: ['test-agent'],
+            agentTypes: ['test-agent'],
             onTask,
             redisClient: r as any,
             pluginRegistry: new PluginRegistry(),
@@ -217,9 +217,9 @@ describe('GatewayWorker', () => {
         expect(callbackData.body.status).toBe(AgentState.CANCELLED);
     });
 
-    test('AnonymousWorker returns capabilities', () => {
+    test('AnonymousWorker returns agentTypes', () => {
         const worker = createWorker(async () => null);
-        expect(worker.getCapabilities()).toEqual(['test-agent']);
+        expect(worker.getAgentTypes()).toEqual(['test-agent']);
     });
 
     test('handleMessage passes cancel signal to context', async () => {

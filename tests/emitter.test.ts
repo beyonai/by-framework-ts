@@ -55,7 +55,7 @@ describe('GatewayDataEmitter', () => {
         expect(payload.session_id).toBe('sess-1');
         expect(payload.trace_id).toBe('trace-1');
         expect(payload.event_type).toBe('custom_event');
-        expect(payload.source_agent_id).toBe('agent-a');
+        expect(payload.source_agent_type).toBe('agent-a');
         expect(payload.message_id).toBe('msg-1');
         expect(typeof payload.timestamp).toBe('number');
     });

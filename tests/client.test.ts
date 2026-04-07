@@ -39,8 +39,10 @@ jest.mock('../src/registry', () => {
     return {
         WorkerRegistry: jest.fn().mockImplementation(() => ({
             getTargetWorker: jest.fn().mockResolvedValue('worker-123'),
-            hasCapability: jest.fn().mockResolvedValue([true, ['worker-123']]),
+            hasAgentType: jest.fn().mockResolvedValue([true, ['worker-123']]),
+            hasOnlineAgentType: jest.fn().mockResolvedValue([true, ['worker-123']]),
             isWorkerAlive: jest.fn().mockResolvedValue(true),
+            isWorkerOnline: jest.fn().mockResolvedValue(true),
             getExecutionByMessageId: jest.fn().mockResolvedValue(null),
             markExecutionCancelling: jest.fn().mockResolvedValue(undefined),
             saveExecution: jest.fn().mockResolvedValue(undefined),

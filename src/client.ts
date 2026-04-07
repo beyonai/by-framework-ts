@@ -11,6 +11,11 @@ import { BaiYingMessage } from './protocol/message';
 import { GatewayInterceptor } from './interceptors';
 
 // === Types ===
+interface RouteResolution {
+    streamName: string;
+    targetWorkerId: string;
+}
+
 interface SendMessageParams {
     readonly targetAgentType: string;
     readonly sessionId: string;
@@ -19,12 +24,12 @@ interface SendMessageParams {
     readonly traceId?: string;
     readonly tenantId?: string;
     readonly actionType?: ActionType;
-    readonly payload?: Readonly<Record<string, unknown>>;
+    readonly extraPayload?: Readonly<Record<string, unknown>>;
     readonly parentMessageId?: string;
     readonly messageId?: string;
     readonly metadata?: Readonly<Record<string, unknown>>;
     readonly targetWorkerId?: string;
-    readonly probeCapability?: boolean;
+    readonly requireOnlineWorker?: boolean;
 }
 
 export class GatewayClient {
@@ -50,6 +55,69 @@ export class GatewayClient {
             }
         }
         return result;
+    }
+
+    /**
+     * Resolve agent-type-mode routing.
+     * Agent type sends always publish to the agent-type stream. When requireOnlineWorker is true,
+     * we verify that at least one online worker exists.
+     */
+    private async resolveAgentTypeRoute(targetAgentType: string, requireOnlineWorker: boolean): Promise<RouteResolution> {
+        if (requireOnlineWorker) {
+            const [hasOnline] = await this.registry.hasOnlineAgentType(targetAgentType);
+            if (hasOnline) {
+                return { streamName: QueueNames.ctrl_stream(targetAgentType), targetWorkerId: '' };
+            }
+            throw new Error(`No online worker found for agent_type '${targetAgentType}'`);
+        }
+        return { streamName: QueueNames.ctrl_stream(targetAgentType), targetWorkerId: '' };
+    }
+
+    /**
+     * Resolve direct-worker routing for debug or worker-specific control.
+     */
+    private async resolveDirectWorkerRoute(targetWorkerId: string, requireOnlineWorker: boolean): Promise<RouteResolution> {
+        if (requireOnlineWorker) {
+            const isOnline = await this.registry.isWorkerOnline(targetWorkerId);
+            if (!isOnline) {
+                throw new Error(`Target worker '${targetWorkerId}' is not online or not registered`);
+            }
+        }
+        return {
+            streamName: QueueNames.worker_ctrl_stream(targetWorkerId),
+            targetWorkerId: targetWorkerId,
+        };
+    }
+
+    /**
+     * Build a gateway command from parameters.
+     */
+    private buildGatewayCommand(
+        actionType: ActionType | string,
+        header: MessageHeader,
+        content: string | unknown[],
+        extraPayload: Record<string, unknown>
+    ): AskAgentCommand | ResumeCommand {
+        if (actionType === ActionType.RESUME) {
+            const resumePayload = { ...extraPayload };
+            const status = String(resumePayload.status || '');
+            const replyData = resumePayload.reply_data;
+            delete resumePayload.status;
+            delete resumePayload.reply_data;
+            return new ResumeCommand(
+                header,
+                content as string | unknown[],
+                status,
+                replyData,
+                resumePayload
+            );
+        }
+        return new AskAgentCommand(
+            header,
+            content as string | unknown[],
+            Boolean((extraPayload as { wait_for_reply?: boolean }).wait_for_reply),
+            Object.fromEntries(Object.entries(extraPayload).filter(([key]) => key !== 'wait_for_reply'))
+        );
     }
 
     async sendCommand(command: BaseCommand, streamName?: string): Promise<SendMessageResponse> {
@@ -179,7 +247,7 @@ export class GatewayClient {
     }
 
     async sendMessage(params: SendMessageParams): Promise<SendMessageResponse> {
-        const probeCapability = params.probeCapability ?? true;
+        const requireOnline = params.requireOnlineWorker ?? true;
 
         // Run interceptors before sending
         let requestParams: Record<string, any> = {
@@ -189,53 +257,43 @@ export class GatewayClient {
             content: params.content,
             actionType: params.actionType || ActionType.ASK_AGENT,
             parentMessageId: params.parentMessageId || '',
-            payload: params.payload || {},
+            extraPayload: params.extraPayload || {},
             metadata: params.metadata || {},
         };
         requestParams = this.runInterceptors(requestParams);
 
-        let workerId: string | null = null;
-        let resolvedStreamName: string | undefined;
-
-        // 3. Resolve worker_id and optionally probe capability
-        if (params.targetWorkerId) {
-            // Verify target worker is alive before sending
-            if (probeCapability) {
-                const isAlive = await this.registry.isWorkerAlive(params.targetWorkerId);
-                if (!isAlive) {
-                    return {
-                        success: false,
-                        status: ExecutionStatus.FAILED,
-                        message_id: '',
-                        trace_id: '',
-                        target_worker_id: params.targetWorkerId,
-                        timestamp: Date.now(),
-                        error: `Target worker '${params.targetWorkerId}' is not alive or not registered`,
-                        error_code: ExecutionStatus.ERR_WORKER_NOT_ALIVE,
-                    };
-                }
+        // Resolve route and optionally probe agent type/liveness
+        let route: RouteResolution;
+        try {
+            if (params.targetWorkerId) {
+                route = await this.resolveDirectWorkerRoute(params.targetWorkerId, requireOnline);
+            } else {
+                route = await this.resolveAgentTypeRoute(params.targetAgentType, requireOnline);
             }
-            workerId = params.targetWorkerId;
-            resolvedStreamName = QueueNames.worker_ctrl_stream(params.targetWorkerId);
-        } else if (probeCapability) {
-            // Probe: check if any worker with the capability exists
-            const [hasCap, workers] = await this.registry.hasCapability(params.targetAgentType);
-            if (!hasCap) {
+        } catch (err) {
+            const error = err instanceof Error ? err.message : String(err);
+            if (error.includes('not online')) {
                 return {
                     success: false,
                     status: ExecutionStatus.FAILED,
                     message_id: '',
                     trace_id: '',
-                    target_worker_id: '',
+                    target_worker_id: params.targetWorkerId || '',
                     timestamp: Date.now(),
-                    error: `No alive worker found with capability '${params.targetAgentType}'`,
-                    error_code: ExecutionStatus.ERR_CAPABILITY_NOT_FOUND,
+                    error: error,
+                    error_code: ExecutionStatus.ERR_WORKER_NOT_ALIVE,
                 };
             }
-            workerId = workers[Math.floor(Math.random() * workers.length)];
-        } else {
-            // No probe: send directly to capability stream (worker_id will be resolved later)
-            resolvedStreamName = QueueNames.ctrl_stream(params.targetAgentType);
+            return {
+                success: false,
+                status: ExecutionStatus.FAILED,
+                message_id: '',
+                trace_id: '',
+                target_worker_id: '',
+                timestamp: Date.now(),
+                error: error,
+                error_code: ExecutionStatus.ERR_AGENT_TYPE_NOT_FOUND,
+            };
         }
 
         const messageId = params.messageId || `msg-${uuidv4().slice(0, 8)}`;
@@ -248,20 +306,14 @@ export class GatewayClient {
         } else {
             const msgs = Array.isArray(requestParams.content) ? requestParams.content : [requestParams.content];
             formattedContent = msgs.map((m): unknown => {
-                // 如果传入的已经是序列化后的字典格式，不强求实例化
                 if (!m || typeof m !== 'object') {
                     return m;
                 }
-
-                // 确保对 role 和 content 属性进行安全提取
                 const role = (m as BaiYingMessage).role;
                 const innerContent = (m as BaiYingMessage).content;
-
-                // 如果没有 content 属性，可能这是一个非标准的自由扩展对象，直接透传
                 if (innerContent === undefined) {
                     return m;
                 }
-
                 const msgObj = {
                     role: role,
                     content: typeof innerContent === 'string' ? innerContent : {
@@ -282,27 +334,22 @@ export class GatewayClient {
             metadata: requestParams.metadata,
         });
 
-        const payload = requestParams.payload ?? {};
+        const payload = requestParams.extraPayload ?? {};
         const mergedPayload: Record<string, unknown> = {
             ...payload,
             attachments: (payload as { attachments?: unknown[] })?.attachments || []
         };
 
-        const command = (requestParams.actionType || ActionType.ASK_AGENT) === ActionType.RESUME
-            ? new ResumeCommand(
-                header,
-                formattedContent as string | unknown[],
-                String(mergedPayload.status || ''),
-                mergedPayload.reply_data,
-                Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => !['status', 'reply_data'].includes(key)))
-            )
-            : new AskAgentCommand(
-                header,
-                formattedContent as string | unknown[],
-                Boolean((mergedPayload as { wait_for_reply?: boolean }).wait_for_reply),
-                Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
-            );
+        const command = this.buildGatewayCommand(
+            requestParams.actionType || ActionType.ASK_AGENT,
+            header,
+            formattedContent,
+            mergedPayload
+        );
 
-        return this.sendCommand(command, resolvedStreamName);
+        // When requireOnline=true, don't pass streamName so sendCommand handles routing and calls saveExecution
+        // When requireOnline=false, pass streamName directly to skip the check
+        const streamName = requireOnline ? undefined : route.streamName;
+        return this.sendCommand(command, streamName);
     }
 }

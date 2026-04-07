@@ -8,10 +8,10 @@
 
 export class QueueNames {
   /**
-   * Control stream queue for dispatching tasks to workers with specific capabilities.
+   * Control stream queue for dispatching tasks to workers with specific agent types.
    */
-  static ctrl_stream(capability: string): string {
-    return `byai_gateway:ctrl:capability:${capability}`;
+  static ctrl_stream(agentType: string): string {
+    return `byai_gateway:ctrl:agent_type:${agentType}`;
   }
 
   /**
@@ -70,18 +70,28 @@ export class RegistryKeys {
   /** Default heartbeat interval (10 seconds) */
   static SD_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10;
 
+  /** Worker online lease TTL (seconds) - existence means worker is online */
+  static WORKER_DEFAULT_LEASE_TTL_SECONDS = 30;
+
   /**
-   * Worker capabilities set - stores all capability identifiers supported by a worker.
+   * Worker online lease key - existence indicates worker is online.
    */
-  static worker_capabilities(workerId: string): string {
-    return `byai_gateway:registry:worker:capabilities:${workerId}`;
+  static worker_online_lease(workerId: string): string {
+    return `byai_gateway:registry:worker:online:${workerId}`;
   }
 
   /**
-   * Capability workers set - stores all worker IDs with a specific capability.
+   * Worker declared agent types set - stores all agent type identifiers supported by a worker.
    */
-  static capability_workers(capability: string): string {
-    return `byai_gateway:registry:capability:workers:${capability}`;
+  static workerDeclaredAgentTypes(workerId: string): string {
+    return `byai_gateway:registry:worker:agent_types:${workerId}`;
+  }
+
+  /**
+   * Agent type members set - stores all worker IDs with a specific agent type.
+   */
+  static agentTypeMembers(agentType: string): string {
+    return `byai_gateway:registry:agent_type:workers:${agentType}`;
   }
 
   /**

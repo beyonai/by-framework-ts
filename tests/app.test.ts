@@ -23,7 +23,7 @@ const { initRedis, closeRedis } = jest.requireMock('../src/redis_client') as {
 };
 
 class DummyWorker extends GatewayWorker {
-    getCapabilities(): string[] {
+    getAgentTypes(): string[] {
         return ['dummy-agent'];
     }
 

@@ -38,7 +38,7 @@ class WorkspaceAwareWorker extends GatewayWorker {
         super('workspace-worker', registry, redisClient, undefined, workspaceManager, sandbox);
     }
 
-    getCapabilities(): string[] {
+    getAgentTypes(): string[] {
         return ['workspace-agent'];
     }
 

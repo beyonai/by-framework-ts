@@ -8,7 +8,7 @@ import { PluginRegistry } from './extensions/registry';
 
 export interface WorkerOptions {
     workerId: string;
-    capabilities: string[];
+    agentTypes: string[];
     onTask: (command: GatewayCommand, context: AgentContext) => Promise<any>;
     redisClient?: Redis;
     groupName?: string;
@@ -25,7 +25,7 @@ export function createWorkerRunner(options: WorkerOptions): WorkerRunner {
     const registry = new WorkerRegistry(options.redisClient);
     const worker = new AnonymousWorker({
         workerId: options.workerId,
-        capabilities: options.capabilities,
+        agentTypes: options.agentTypes,
         onTask: options.onTask,
         registry,
         redisClient: options.redisClient,

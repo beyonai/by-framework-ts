@@ -21,21 +21,21 @@ async function main() {
 
     const redis = createRedis(redisOpts);
     const workerId = "pubsub-demo-worker";
-    const capabilities = ["pubsub-capability"];
+    const agentTypes = ["pubsub-agent-type"];
 
     console.log("=== Pub/Sub 模式演示 ===");
 
     const registry = new WorkerRegistry(redis);
-    await registry.registerWorker(workerId, capabilities);
+    await registry.registerWorker(workerId, agentTypes);
     console.log("[1] 注册成功");
 
     // 1.1 启动心跳维持组件 (Standalone Heartbeat)
-    const heartbeat = new WorkerHeartbeat(workerId, capabilities, redis);
+    const heartbeat = new WorkerHeartbeat(workerId, agentTypes, redis);
     await heartbeat.start();
 
     // 为 Runner 提供独立的 Redis 连接，避免轮询时的 BLOCK 指令阻塞其他操作（如 emitChunk）
     // 关键：轮询必须拥有自己的独占连接
-    const runner = new WorkerRunner({ workerId, capabilities }, {
+    const runner = new WorkerRunner({ workerId, agentTypes }, {
         redisClient: createRedis(redisOpts)
     });
     const emitter = new GatewayDataEmitter(redis);

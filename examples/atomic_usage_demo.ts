@@ -11,18 +11,18 @@ import {
 async function main() {
     const redis = createRedis();
     const workerId = "atomic-demo-worker";
-    const capabilities = ["atomic-capability"];
+    const agentTypes = ["atomic-agent-type"];
 
     console.log("=== 原子能力演示 ===");
 
     // 1. 原子注册与心跳 (可选)
     const registry = new WorkerRegistry(redis);
-    await registry.registerWorker(workerId, capabilities);
+    await registry.registerWorker(workerId, agentTypes);
     console.log("[1] 注册成功");
 
     // 2. 原子获取消息
     // 无需创建完整的 Worker 实例，只需提供必要元数据
-    const runner = new WorkerRunner({ workerId, capabilities }, { redisClient: redis });
+    const runner = new WorkerRunner({ workerId, agentTypes }, { redisClient: redis });
     // 注意：手动模式下用户需要根据需要调用 runner.initialize() 来获取锁和设置消费组
     await runner.initialize();
 

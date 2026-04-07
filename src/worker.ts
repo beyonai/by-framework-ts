@@ -14,6 +14,7 @@ import { PluginRegistry } from './extensions/registry';
 import { HistoryProvider } from './history';
 import { WorkspaceManager } from './workspace';
 import { HookSandbox, getActiveWorkspace, setActiveWorkspace } from './sandbox';
+import { FileStorage } from './runtime/filestore/base';
 
 // === Types ===
 interface HandleMessageOptions {
@@ -30,6 +31,10 @@ interface CancelSignalLegacy {
     readonly is_set?: boolean;
 }
 
+// Default heartbeat configuration (aligned with Python WorkerConfig)
+const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10;
+const DEFAULT_HEARTBEAT_LEASE_TTL_SECONDS = 30;
+
 export abstract class GatewayWorker {
     public readonly workerId: string;
     protected readonly redis: Redis;
@@ -37,6 +42,7 @@ export abstract class GatewayWorker {
     public readonly pluginRegistry: PluginRegistry;
     protected readonly workspaceManager?: WorkspaceManager;
     protected readonly sandbox?: HookSandbox;
+    public readonly storage?: FileStorage;
 
     public constructor(
         workerId: string,
@@ -44,7 +50,8 @@ export abstract class GatewayWorker {
         redisClient?: Redis,
         pluginRegistry?: PluginRegistry,
         workspaceManager?: WorkspaceManager,
-        sandbox?: HookSandbox
+        sandbox?: HookSandbox,
+        storage?: FileStorage
     ) {
         this.workerId = workerId;
         this.redis = redisClient ?? getRedis();
@@ -52,9 +59,20 @@ export abstract class GatewayWorker {
         this.pluginRegistry = pluginRegistry ?? new PluginRegistry();
         this.workspaceManager = workspaceManager;
         this.sandbox = sandbox;
+        this.storage = storage;
     }
 
-    abstract getCapabilities(): ReadonlyArray<string>;
+    /** Return the heartbeat interval in seconds. */
+    get heartbeatInterval(): number {
+        return DEFAULT_HEARTBEAT_INTERVAL_SECONDS;
+    }
+
+    /** Return the worker online lease TTL in seconds. */
+    get heartbeatLeaseTtlSeconds(): number {
+        return DEFAULT_HEARTBEAT_LEASE_TTL_SECONDS;
+    }
+
+    abstract getAgentTypes(): ReadonlyArray<string>;
 
     abstract processCommand(command: GatewayCommand, context: AgentContext): Promise<unknown>;
 
@@ -67,16 +85,16 @@ export abstract class GatewayWorker {
     async startHeartbeat(): Promise<void> {
         await this.pluginRegistry.onWorkerStartup(this);
         // Initial registration
-        await this.registry.registerWorker(this.workerId, [...this.getCapabilities()]);
+        await this.registry.registerWorker(this.workerId, [...this.getAgentTypes()]);
 
-        // Periodic refresh every 30s
+        // Periodic refresh using configured interval
         this.heartbeatTimer = setInterval(async () => {
             try {
-                await this.registry.registerWorker(this.workerId, [...this.getCapabilities()]);
+                await this.registry.registerWorker(this.workerId, [...this.getAgentTypes()]);
             } catch (err) {
                 console.error(`[${this.workerId}] Heartbeat failed:`, err);
             }
-        }, 30000);
+        }, this.heartbeatInterval * 1000);
     }
 
     stopHeartbeat(): void {
@@ -272,7 +290,8 @@ export abstract class GatewayWorker {
         );
     }
 
-    private async persistAgentReturnState(paths: { private?: string; public?: string } | null, command: GatewayCommand): Promise<void> {
+    /** Persist agent return state to filesystem (aligned with Python _persist_agent_return_state). */
+    protected async persistAgentReturnState(paths: { private?: string; public?: string } | null, command: GatewayCommand): Promise<void> {
         if (!paths || !paths.public) return;
 
         const header = command.header;
@@ -312,27 +331,28 @@ export abstract class GatewayWorker {
  * Suitable for decoupled mode or quick integration.
  */
 export class AnonymousWorker extends GatewayWorker {
-    private readonly capabilities: ReadonlyArray<string>;
+    private readonly agentTypes: ReadonlyArray<string>;
     private readonly onTask: (command: GatewayCommand, context: AgentContext) => Promise<unknown>;
 
     constructor(options: {
         readonly workerId: string;
-        readonly capabilities: ReadonlyArray<string>;
+        readonly agentTypes: ReadonlyArray<string>;
         readonly onTask: (command: GatewayCommand, context: AgentContext) => Promise<unknown>;
         readonly registry?: WorkerRegistry;
         readonly redisClient?: Redis;
         readonly pluginRegistry?: PluginRegistry;
+        readonly storage?: FileStorage;
     }) {
         const redis = options.redisClient ?? new Redis();
         const registry = options.registry ?? new WorkerRegistry(redis);
         const pluginRegistry = options.pluginRegistry ?? new PluginRegistry();
-        super(options.workerId, registry, redis, pluginRegistry);
-        this.capabilities = options.capabilities;
+        super(options.workerId, registry, redis, pluginRegistry, undefined, undefined, options.storage);
+        this.agentTypes = options.agentTypes;
         this.onTask = options.onTask;
     }
 
-    getCapabilities(): ReadonlyArray<string> {
-        return this.capabilities;
+    getAgentTypes(): ReadonlyArray<string> {
+        return this.agentTypes;
     }
 
     async processCommand(command: GatewayCommand, context: AgentContext): Promise<unknown> {

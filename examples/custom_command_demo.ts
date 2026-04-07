@@ -44,7 +44,7 @@ class CustomAuditCommand extends BaseCommand {
 registerCommand(CustomAuditCommand);
 
 class CustomAuditWorker extends GatewayWorker {
-    getCapabilities(): string[] {
+    getAgentTypes(): string[] {
         return ['custom-audit-agent-ts'];
     }
 

@@ -7,7 +7,7 @@ TypeScript SDK for Gateway Worker communication, supporting both atomic request-
 系统采用事件驱动与“控制流-数据流分离”的双流设计，高度解耦：
 
 - **接入层 (业务门户)**: 使用 `GatewayClient` 向 Redis Input MQ 投递基于 `session_id` 和 `target_agent_type` 的结构化控制指令。
-- **调度缓冲 (Input MQ)**: 利用 Redis Stream 实现 Worker 集群的无状态订阅消费、平滑削峰和基于能力 (Capabilities) 的分组路由。
+- **调度缓冲 (Input MQ)**: 利用 Redis Stream 实现 Worker 集群的无状态订阅消费、平滑削峰和基于 agent_type 的分组路由。
 - **执行层 (GatewayWorker)**: 包含 `SuperAssistantWorker` 等实现。Agent通过 `Runner` 主动拉取任务（Pull模型）并进行自驱动处理。每次执行挂载独立的隔离工作空间环境 (基于 ContextVar 注入拦截 `builtins.open` 的动态沙箱 `HookSandbox`)。
 - **输出层 (Data MQ)**: 结果数据异步推入数据流 MQ，支持页面SSE流式打字机推送、数据库持久化和链路追踪监听并行消费。
 
@@ -44,7 +44,7 @@ const registry = new WorkerRegistry(redis);
 const client = new GatewayClient(registry, redis);
 
 const res = await client.sendMessage({
-    targetAgentType: 'capability-a',
+    targetAgentType: 'agent-type-a',
     sessionId: 'test-session',
     content: 'Hello!',
     tenantId: 'test-tenant'
@@ -59,11 +59,11 @@ import { WorkerRunner, WorkerRegistry, GatewayDataEmitter, createRedis, AgentSta
 const redis = createRedis({ host: 'localhost', port: 6379, db: 0 });
 const registry = new WorkerRegistry(redis);
 const workerId = 'my-worker';
-const capabilities = ['capability-a'];
-await registry.registerWorker(workerId, capabilities);
+const agentTypes = ['agent-type-a'];
+await registry.registerWorker(workerId, agentTypes);
 
 const runner = new WorkerRunner(
-    { workerId, capabilities },
+    { workerId, agentTypes },
     { redisClient: redis }
 );
 const emitter = new GatewayDataEmitter(redis);
@@ -237,7 +237,7 @@ new WorkerRegistry(redisClient?: Redis)
 
 ---
 
-#### registry.registerWorker(workerId, capabilities)
+#### registry.registerWorker(workerId, agentTypes)
 
 注册一个 Worker 及其能力。
 
@@ -246,7 +246,7 @@ new WorkerRegistry(redisClient?: Redis)
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | workerId | `string` | 是 | Worker 唯一标识 |
-| capabilities | `string[]` | 是 | Worker 具备的能力列表 |
+| agentTypes | `string[]` | 是 | Worker 具备的能力列表 |
 
 **返回：** `Promise<void>`
 
@@ -360,7 +360,7 @@ new WorkerRegistry(redisClient?: Redis)
 
 ```typescript
 new WorkerRunner(
-    workerOrOptions: GatewayWorker | { workerId: string; capabilities: string[]; registry?: WorkerRegistry },
+    workerOrOptions: GatewayWorker | { workerId: string; agentTypes: string[]; registry?: WorkerRegistry },
     options: {
         redisClient?: Redis;
         groupName?: string;
@@ -372,7 +372,7 @@ new WorkerRunner(
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | workerOrOptions.workerId | `string` | 是 | Worker 唯一标识 |
-| workerOrOptions.capabilities | `string[]` | 是 | Worker 能力列表 |
+| workerOrOptions.agentTypes | `string[]` | 是 | Worker 能力列表 |
 | workerOrOptions.registry | `WorkerRegistry` | 否 | 注册表实例 |
 | options.redisClient | `Redis` | 否 | Redis 客户端（建议传入独立连接避免轮询阻塞） |
 | options.groupName | `string` | 否 | 消费组名称 |

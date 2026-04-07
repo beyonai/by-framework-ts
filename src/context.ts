@@ -221,23 +221,23 @@ export class AgentContext {
         readonly metadata?: Readonly<Record<string, unknown>>;
         readonly messageId?: string;
         readonly parentMessageId?: string;
-        readonly probeCapability?: boolean;
+        readonly probeAgentType?: boolean;
     }): Promise<CallAgentResult> {
-        const probeCapability = params.probeCapability ?? true;
+        const probeAgentType = params.probeAgentType ?? true;
 
-        // Probe capability if enabled
-        if (probeCapability) {
+        // Probe agent type if enabled
+        if (probeAgentType) {
             const { WorkerRegistry } = await import('./registry');
             const registry = new WorkerRegistry(this.redis);
-            const [hasCap] = await registry.hasCapability(params.targetAgentType, true);
+            const [hasCap] = await registry.hasAgentType(params.targetAgentType, true);
             if (!hasCap) {
                 return {
                     status: AgentState.FAILED,
                     messageId: '',
                     parentMessageId: params.parentMessageId || this.currentMessageId,
                     targetAgentType: params.targetAgentType,
-                    error: `No alive worker found with capability '${params.targetAgentType}'`,
-                    error_code: 'CAPABILITY_NOT_FOUND',
+                    error: `No alive worker found with agent type '${params.targetAgentType}'`,
+                    error_code: 'AGENT_TYPE_NOT_FOUND',
                 };
             }
         }

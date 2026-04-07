@@ -77,12 +77,20 @@ class MockRegistry {
         return 'worker-e2e';
     }
 
-    async hasCapability(_capability: string, _checkActive?: boolean): Promise<[boolean, string[]]> {
+    async hasAgentType(_agentType: string, _checkActive?: boolean): Promise<[boolean, string[]]> {
         return [true, ['worker-e2e']];
     }
 
     async isWorkerAlive(_workerId: string): Promise<boolean> {
         return true;
+    }
+
+    async isWorkerOnline(_workerId: string): Promise<boolean> {
+        return true;
+    }
+
+    async hasOnlineAgentType(_agentType: string): Promise<[boolean, string[]]> {
+        return [true, ['worker-e2e']];
     }
 
     async saveExecution(execution: any): Promise<void> {
@@ -109,7 +117,7 @@ class MockRegistry {
     async claimWorkerId(_workerId: string): Promise<string> { return 'lock-token'; }
     async refreshWorkerIdLock(_workerId: string): Promise<boolean> { return true; }
     async releaseWorkerId(_workerId: string, _token?: string): Promise<boolean> { return true; }
-    async registerWorker(_workerId: string, _capabilities: string[]): Promise<void> {}
+    async registerWorker(_workerId: string, _agentTypes: string[]): Promise<void> {}
 }
 
 class E2EPlugin extends Plugin {
@@ -146,7 +154,7 @@ describe('E2E smoke: client -> runner -> worker -> plugin -> history', () => {
         let receivedHistoryCount = -1;
         const worker = new AnonymousWorker({
             workerId: 'worker-e2e',
-            capabilities: ['e2e-agent'],
+            agentTypes: ['e2e-agent'],
             registry: registry as any,
             redisClient: redis as any,
             pluginRegistry,

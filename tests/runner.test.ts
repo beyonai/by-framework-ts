@@ -65,7 +65,7 @@ class SlowWorker extends GatewayWorker {
         super(workerId, registry, redisClient);
     }
 
-    getCapabilities(): string[] {
+    getAgentTypes(): string[] {
         return ['dummy-agent'];
     }
 

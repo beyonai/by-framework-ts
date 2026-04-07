@@ -42,7 +42,7 @@ describe('createWorkerRunner', () => {
 
         const runner = createWorkerRunner({
             workerId: 'worker-1',
-            capabilities: ['cap-a'],
+            agentTypes: ['cap-a'],
             onTask: async () => ({}),
             redisClient,
         });
@@ -64,7 +64,7 @@ describe('createWorkerRunner', () => {
 
         createWorkerRunner({
             workerId: 'worker-1',
-            capabilities: ['cap-a'],
+            agentTypes: ['cap-a'],
             onTask: async () => ({}),
             redisClient,
         });

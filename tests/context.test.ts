@@ -7,7 +7,7 @@ class MockRedis {
     private storage: Map<string, string> = new Map();
     private hashStorage: Map<string, Record<string, string>> = new Map();
     private setStorage: Map<string, string[]> = new Map([
-        ['capability:workers:demo-agent-ts', ['worker-123']],
+        ['agent_type:workers:demo-agent-ts', ['worker-123']],
     ]);
 
     async xadd(name: string, _id: string, field: string, payload: string): Promise<string> {
@@ -19,7 +19,7 @@ class MockRedis {
     }
 
     async smembers(key: string): Promise<string[]> {
-        // Match key patterns like "byai_gateway:registry:capability:workers:demo-agent-ts"
+        // Match key patterns like "byai_gateway:registry:agent_type:workers:demo-agent-ts"
         const matchKey = key.replace(/^byai_gateway:registry:/, '');
         return this.setStorage.get(matchKey) || [];
     }
@@ -81,7 +81,7 @@ describe('AgentContext data message format', () => {
         const payload = JSON.parse(redis.calls[0].payload);
         expect(payload.trace_id).toBe('trace-1');
         expect(payload.session_id).toBe('sess-1');
-        expect(payload.source_agent_id).toBe('agent-a');
+        expect(payload.source_agent_type).toBe('agent-a');
         expect(payload.event_type).toBe(EventType.ANSWER_DELTA);
         expect(typeof payload.timestamp).toBe('number');
         expect(payload.data.contentType).toBe('1002');
@@ -121,7 +121,7 @@ describe('AgentContext data message format', () => {
         expect(typeof result.messageId).toBe('string');
 
         expect(redis.calls.length).toBe(1);
-        expect(redis.calls[0].name).toBe('byai_gateway:ctrl:capability:demo-agent-ts');
+        expect(redis.calls[0].name).toBe('byai_gateway:ctrl:agent_type:demo-agent-ts');
 
         const payload = JSON.parse(redis.calls[0].payload);
         expect(payload.action_type).toBe(ActionType.ASK_AGENT);
