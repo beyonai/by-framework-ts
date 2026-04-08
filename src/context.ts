@@ -140,6 +140,15 @@ export class AgentContext {
         return registry.getAllWorkers() as unknown as Record<string, unknown>;
     }
 
+    /**
+     * Update the execution status for the current message from within business code.
+     */
+    async updateExecutionState(status: string): Promise<void> {
+        const { WorkerRegistry } = await import('./registry');
+        const registry = new WorkerRegistry(this.redis);
+        await registry.updateExecutionStatusByMessage(this.currentMessageId, this.sessionId, status);
+    }
+
     private generateMessageId(): string {
         return `msg-${uuidv4().slice(0, 8)}`;
     }
@@ -266,6 +275,23 @@ export class AgentContext {
             Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
         );
 
+        // Initialize execution record before dispatching
+        {
+            const { WorkerRegistry } = await import('./registry');
+            const registry = new WorkerRegistry(this.redis);
+            await registry.initializeExecution({
+                execution_id: `exec-${uuidv4().slice(0, 8)}`,
+                message_id: messageId,
+                parent_message_id: parentMessageId,
+                session_id: this.sessionId,
+                worker_id: '',
+                target_agent_type: params.targetAgentType,
+                status: 'QUEUED',
+                cancel_requested: false,
+                cancel_reason: '',
+            });
+        }
+
         await this.redis.xadd(
             QueueNames.ctrl_stream(params.targetAgentType),
             '*',
@@ -325,6 +351,8 @@ export class AgentContext {
         }
 
         const dispatchedTasks: DispatchedTask[] = [];
+        const { WorkerRegistry } = await import('./registry');
+        const dispatchRegistry = new WorkerRegistry(this.redis);
 
         for (const task of tasks) {
             const currentMessageId = this.generateMessageId();
@@ -354,6 +382,19 @@ export class AgentContext {
                 'data',
                 JSON.stringify(command.toDict())
             );
+
+            // Initialize execution record for each dispatched task
+            await dispatchRegistry.initializeExecution({
+                execution_id: `exec-${uuidv4().slice(0, 8)}`,
+                message_id: currentMessageId,
+                parent_message_id: currentParentMessageId,
+                session_id: this.sessionId,
+                worker_id: '',
+                target_agent_type: task.targetAgentType,
+                status: 'QUEUED',
+                cancel_requested: false,
+                cancel_reason: '',
+            });
 
             dispatchedTasks.push({
                 message_id: currentMessageId,

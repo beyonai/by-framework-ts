@@ -7,11 +7,13 @@
 
 export class GatewaySDKError extends Error {
   cause: Error | null;
+  code: string;
 
   constructor(message: string, cause?: Error | null) {
     super(message);
     this.name = 'GatewaySDKError';
     this.cause = cause ?? null;
+    this.code = this.constructor.name;
   }
 }
 
@@ -175,5 +177,29 @@ export class CommandValidationError extends GatewaySDKError {
     this.name = 'CommandValidationError';
     this.commandType = commandType;
     this.reason = reason;
+  }
+}
+
+// === HTTP Related Exceptions ===
+
+export class HttpClientError extends GatewaySDKError {
+  statusCode?: number;
+  url: string;
+
+  constructor(message: string, url: string, statusCode?: number, cause?: Error | null) {
+    super(message, cause);
+    this.name = 'HttpClientError';
+    this.url = url;
+    this.statusCode = statusCode;
+  }
+}
+
+export class HttpRequestError extends GatewaySDKError {
+  url: string;
+
+  constructor(message: string, url: string, cause?: Error | null) {
+    super(message, cause);
+    this.name = 'HttpRequestError';
+    this.url = url;
   }
 }

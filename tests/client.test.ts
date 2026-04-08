@@ -41,10 +41,11 @@ jest.mock('../src/registry', () => {
             getTargetWorker: jest.fn().mockResolvedValue('worker-123'),
             hasAgentType: jest.fn().mockResolvedValue([true, ['worker-123']]),
             hasOnlineAgentType: jest.fn().mockResolvedValue([true, ['worker-123']]),
-            isWorkerAlive: jest.fn().mockResolvedValue(true),
             isWorkerOnline: jest.fn().mockResolvedValue(true),
             getExecutionByMessageId: jest.fn().mockResolvedValue(null),
+            getAllSessionExecutions: jest.fn().mockResolvedValue([]),
             markExecutionCancelling: jest.fn().mockResolvedValue(undefined),
+            markCancelRequested: jest.fn().mockResolvedValue(undefined),
             saveExecution: jest.fn().mockResolvedValue(undefined),
         })),
     };
@@ -196,12 +197,13 @@ describe('GatewayClient', () => {
 
         it('should return ALREADY_FINISHED when execution is already terminal', async () => {
             const mockRegistry = (client as any).registry;
-            mockRegistry.getExecutionByMessageId.mockResolvedValue({
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([{
                 execution_id: 'exec-1',
+                message_id: 'msg-1',
                 worker_id: 'worker-123',
                 session_id: 'sess-1',
                 status: 'CANCELLED',
-            });
+            }]);
 
             const response = await client.cancelTask({
                 messageId: 'msg-1',
@@ -217,13 +219,14 @@ describe('GatewayClient', () => {
 
         it('should route cancel task command to worker control stream', async () => {
             const mockRegistry = (client as any).registry;
-            mockRegistry.getExecutionByMessageId.mockResolvedValue({
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([{
                 execution_id: 'exec-1',
+                message_id: 'msg-1',
                 worker_id: 'worker-123',
                 session_id: 'sess-1',
                 target_agent_type: 'demo-agent-ts',
                 status: 'RUNNING',
-            });
+            }]);
 
             const response = await client.cancelTask({
                 messageId: 'msg-1',
@@ -244,7 +247,6 @@ describe('GatewayClient', () => {
 
             const serializedMsg = JSON.parse(callArgs[3]);
             expect(serializedMsg.action_type).toBe(ActionType.CANCEL_TASK);
-            expect(serializedMsg.header.parent_message_id).toBe('msg-1');
             expect(serializedMsg.body.target_message_id).toBe('msg-1');
             expect(serializedMsg.body.target_execution_id).toBe('exec-1');
             expect(serializedMsg.body.target_worker_id).toBe('worker-123');
@@ -255,13 +257,14 @@ describe('GatewayClient', () => {
 
         it('should mark queued execution as cancelling even when worker has not claimed it yet', async () => {
             const mockRegistry = (client as any).registry;
-            mockRegistry.getExecutionByMessageId.mockResolvedValue({
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([{
                 execution_id: 'exec-queued',
+                message_id: 'msg-queued',
                 worker_id: '',
                 session_id: 'sess-1',
                 target_agent_type: 'demo-agent-ts',
                 status: 'QUEUED',
-            });
+            }]);
 
             const response = await client.cancelTask({
                 messageId: 'msg-queued',

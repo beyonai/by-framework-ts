@@ -18,6 +18,14 @@ class MockRedis {
         return '1-0';
     }
 
+    async get(key: string): Promise<string | null> {
+        // Simulate worker online lease key existing
+        if (key.includes('worker:online:')) {
+            return '1';
+        }
+        return this.storage.get(key) ?? null;
+    }
+
     async smembers(key: string): Promise<string[]> {
         // Match key patterns like "byai_gateway:registry:agent_type:workers:demo-agent-ts"
         const matchKey = key.replace(/^byai_gateway:registry:/, '');
@@ -57,7 +65,10 @@ class MockRedis {
                 self.xadd(name, id, field, payload);
                 return pipe;
             },
-            expire: (key: string, seconds: number) => {
+            hset: (_key: string, _fieldOrMapping: string | Record<string, string>, _value?: string) => {
+                return pipe;
+            },
+            expire: (_key: string, _seconds: number) => {
                 return pipe;
             },
             exec: async () => {

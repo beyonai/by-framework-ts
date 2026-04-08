@@ -125,42 +125,16 @@ export class WorkerRegistry {
     }
 
     /**
-     * Check if a specific worker is alive (has recent heartbeat).
-     *
-     * @param workerId - Worker ID to check
-     * @param healthThresholdMs - Time threshold in ms to consider worker alive (default 30 seconds)
-     * @returns True if worker is alive, false otherwise
-     */
-    async isWorkerAlive(workerId: string, healthThresholdMs: number = RegistryKeys.SD_DEFAULT_HEALTH_THRESHOLD_MS): Promise<boolean> {
-        const nowMs = Date.now();
-        const minScore = nowMs - healthThresholdMs;
-
-        const activeWorkers = await this.redis.zrangebyscore(
-            RegistryKeys.ACTIVE_WORKERS,
-            minScore.toString(),
-            '+inf'
-        );
-
-        const activeIds = new Set<string>();
-        for (const worker of activeWorkers) {
-            activeIds.add(worker);
-        }
-
-        return activeIds.has(workerId);
-    }
-
-    /**
-     * Check if an agent type has any registered and alive workers.
+     * Check if an agent type has any registered and online workers.
+     * Uses lease-based online check (aligned with Python SDK).
      *
      * @param agentType - Agent type identifier to check
-     * @param checkActive - Whether to check worker active status (default true)
-     * @param healthThresholdMs - Time threshold in ms to consider worker alive (default 30 seconds)
+     * @param checkActive - Whether to check worker online status (default true)
      * @returns Tuple of [hasAgentType, workerIds[]]
      */
     async hasAgentType(
         agentType: string,
-        checkActive: boolean = true,
-        healthThresholdMs: number = RegistryKeys.SD_DEFAULT_HEALTH_THRESHOLD_MS
+        checkActive: boolean = true
     ): Promise<[boolean, string[]]> {
         const workers = await this.redis.smembers(RegistryKeys.agentTypeMembers(agentType));
         if (!workers || workers.length === 0) {
@@ -170,21 +144,13 @@ export class WorkerRegistry {
         let workerIds = [...workers];
 
         if (checkActive) {
-            const nowMs = Date.now();
-            const minScore = nowMs - healthThresholdMs;
-
-            const activeWorkers = await this.redis.zrangebyscore(
-                RegistryKeys.ACTIVE_WORKERS,
-                minScore.toString(),
-                '+inf'
-            );
-
-            const activeIds = new Set<string>();
-            for (const worker of activeWorkers) {
-                activeIds.add(worker);
+            const onlineWorkerIds: string[] = [];
+            for (const workerId of workerIds) {
+                if (await this.isWorkerOnline(workerId)) {
+                    onlineWorkerIds.push(workerId);
+                }
             }
-
-            workerIds = workerIds.filter(id => activeIds.has(id));
+            workerIds = onlineWorkerIds;
         }
 
         return [workerIds.length > 0, workerIds];
@@ -248,11 +214,146 @@ export class WorkerRegistry {
         return true;
     }
 
+    /**
+     * Initialize a new execution record with timeline tracking.
+     * Sets created_at, updated_at, started_at=0, finished_at=0, and initial timeline entry.
+     */
+    async initializeExecution(execution: Record<string, any>): Promise<void> {
+        const now = Date.now();
+        const executionId = String(execution.execution_id);
+        const messageId = String(execution.message_id);
+        const sessionId = String(execution.session_id);
+        const regKey = RegistryKeys.session_registry(sessionId);
+
+        const record = {
+            ...execution,
+            created_at: now,
+            updated_at: now,
+            started_at: 0,
+            finished_at: 0,
+            timeline: [{ status: execution.status || 'QUEUED', timestamp: now }],
+        };
+
+        await this.redis.pipeline()
+            .hset(regKey, `exec:${executionId}`, JSON.stringify(record))
+            .hset(regKey, `msg_map:${messageId}`, executionId)
+            .expire(regKey, RegistryKeys.DEFAULT_SESSION_TTL)
+            .exec();
+    }
+
+    /**
+     * Update execution status with timeline tracking.
+     */
+    async updateExecutionStatus(
+        executionId: string,
+        sessionId: string,
+        status: string,
+        extra?: Record<string, any>
+    ): Promise<void> {
+        const current = await this.getExecution(executionId, sessionId);
+        if (!current) return;
+
+        const now = Date.now();
+        current.status = status;
+        current.updated_at = now;
+
+        if (status === 'RUNNING' && (!current.started_at || current.started_at === 0)) {
+            current.started_at = now;
+        }
+
+        if (extra) {
+            Object.assign(current, extra);
+        }
+
+        const timeline = Array.isArray(current.timeline) ? current.timeline : [];
+        timeline.push({ status, timestamp: now });
+        current.timeline = timeline;
+
+        const regKey = RegistryKeys.session_registry(sessionId);
+        await this.redis.pipeline()
+            .hset(regKey, `exec:${executionId}`, JSON.stringify(current))
+            .expire(regKey, RegistryKeys.DEFAULT_SESSION_TTL)
+            .exec();
+    }
+
+    /**
+     * Update execution status by message ID.
+     */
+    async updateExecutionStatusByMessage(
+        messageId: string,
+        sessionId: string,
+        status: string
+    ): Promise<void> {
+        const regKey = RegistryKeys.session_registry(sessionId);
+        const executionId = await this.redis.hget(regKey, `msg_map:${messageId}`);
+        if (!executionId) return;
+        await this.updateExecutionStatus(executionId, sessionId, status);
+    }
+
+    /**
+     * Get all execution records for a session.
+     */
+    async getAllSessionExecutions(sessionId: string): Promise<Record<string, any>[]> {
+        const regKey = RegistryKeys.session_registry(sessionId);
+        const allFields = await this.redis.hgetall(regKey);
+        if (!allFields) return [];
+
+        const executions: Record<string, any>[] = [];
+        for (const [key, value] of Object.entries(allFields)) {
+            if (key.startsWith('exec:')) {
+                try {
+                    executions.push(JSON.parse(value));
+                } catch {
+                    // Skip invalid JSON
+                }
+            }
+        }
+        return executions;
+    }
+
+    /**
+     * Mark an execution as cancel_requested WITHOUT changing its status.
+     * Used for terminal ancestors in cascading cancellation.
+     */
+    async markCancelRequested(
+        executionId: string,
+        sessionId: string,
+        reason?: string
+    ): Promise<void> {
+        const current = await this.getExecution(executionId, sessionId);
+        if (!current) return;
+
+        const now = Date.now();
+        current.cancel_requested = true;
+        if (reason) {
+            current.cancel_reason = reason;
+        }
+        current.updated_at = now;
+
+        const regKey = RegistryKeys.session_registry(sessionId);
+        await this.redis.pipeline()
+            .hset(regKey, `exec:${executionId}`, JSON.stringify(current))
+            .expire(regKey, RegistryKeys.DEFAULT_SESSION_TTL)
+            .exec();
+    }
+
     async saveExecution(execution: Record<string, any>): Promise<void> {
         const executionId = String(execution.execution_id);
         const messageId = String(execution.message_id);
         const sessionId = String(execution.session_id);
         const regKey = RegistryKeys.session_registry(sessionId);
+
+        const now = Date.now();
+        if (!execution.created_at) {
+            execution.created_at = now;
+        }
+        if (!execution.updated_at) {
+            execution.updated_at = now;
+        }
+        if (!execution.timeline) {
+            execution.timeline = [{ status: execution.status || 'QUEUED', timestamp: now }];
+        }
+
         const encodedData = JSON.stringify(execution);
 
         await this.redis.pipeline()
@@ -290,10 +391,15 @@ export class WorkerRegistry {
             return;
         }
 
+        const now = Date.now();
         current.status = 'CANCELLING';
         current.cancel_requested = true;
         current.cancel_reason = reason;
-        current.updated_at = Date.now();
+        current.updated_at = now;
+
+        const timeline = Array.isArray(current.timeline) ? current.timeline : [];
+        timeline.push({ status: 'CANCELLING', timestamp: now });
+        current.timeline = timeline;
 
         const regKey = RegistryKeys.session_registry(sessionId);
         await this.redis.pipeline()
@@ -308,9 +414,14 @@ export class WorkerRegistry {
             return;
         }
 
+        const now = Date.now();
         current.status = status;
-        current.finished_at = Date.now();
-        current.updated_at = current.finished_at;
+        current.finished_at = now;
+        current.updated_at = now;
+
+        const timeline = Array.isArray(current.timeline) ? current.timeline : [];
+        timeline.push({ status, timestamp: now });
+        current.timeline = timeline;
 
         const regKey = RegistryKeys.session_registry(sessionId);
         await this.redis.pipeline()

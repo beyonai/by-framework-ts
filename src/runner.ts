@@ -140,8 +140,9 @@ export class WorkerRunner {
      */
     async release(): Promise<void> {
         this.controlLoopRunning = false;
-        this.worker.stopHeartbeat();
-        this.worker.registry.unregisterWorker(this.worker.workerId);
+        await this.worker.stopHeartbeat();
+        await this.worker.registry.markWorkerInactive(this.worker.workerId);
+        await this.worker.registry.unregisterWorkerMembership(this.worker.workerId);
         if ((this.worker as any).pluginRegistry?.onWorkerShutdown) {
             if (this.worker.pluginRegistry.logHookStatsOnShutdown) {
                 this.worker.pluginRegistry.logHookStats();
@@ -284,8 +285,14 @@ export class WorkerRunner {
             });
             this.messageToExecution.set(data.header.messageId, executionId);
 
-            // Always upsert RUNNING snapshot so worker_id is available for cancel routing.
-            if (registry?.saveExecution) {
+            // Update or create RUNNING execution so worker_id is available for cancel routing.
+            if (existingExecution && registry?.updateExecutionStatus) {
+                await registry.updateExecutionStatus(executionId, data.header.sessionId, 'RUNNING', {
+                    worker_id: this.worker.workerId,
+                    stream_name: streamName,
+                    redis_message_id: msgId,
+                });
+            } else if (registry?.saveExecution) {
                 const nowMs = Date.now();
                 await registry.saveExecution({
                     execution_id: executionId,
@@ -299,9 +306,9 @@ export class WorkerRunner {
                     status: 'RUNNING',
                     cancel_requested: Boolean(existingExecution?.cancel_requested),
                     cancel_reason: cancelReason,
-                    created_at: Number(existingExecution?.created_at || nowMs),
+                    created_at: nowMs,
                     started_at: nowMs,
-                    finished_at: Number(existingExecution?.finished_at || 0),
+                    finished_at: 0,
                     updated_at: nowMs,
                 });
             }

@@ -70,8 +70,11 @@ export class RegistryKeys {
   /** Default heartbeat interval (10 seconds) */
   static SD_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10;
 
+  /** Worker default heartbeat interval (seconds) */
+  static WORKER_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5;
+
   /** Worker online lease TTL (seconds) - existence means worker is online */
-  static WORKER_DEFAULT_LEASE_TTL_SECONDS = 30;
+  static WORKER_DEFAULT_LEASE_TTL_SECONDS = 15;
 
   /**
    * Worker online lease key - existence indicates worker is online.

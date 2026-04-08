@@ -7,8 +7,9 @@ import { GatewayCommand, ResumeCommand, AskAgentCommand } from './protocol/comma
 import { AgentState, isTerminalState } from './protocol/agent_state';
 import { EventType } from './protocol/event_type';
 import { AgentContext, TaskCancelledError } from './context';
-import { QueueNames, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED } from './constants';
+import { QueueNames, RegistryKeys, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED } from './constants';
 import { WorkerRegistry } from './registry';
+import { WorkerHeartbeat } from './heartbeat';
 import { MessageHeader } from './protocol/message_header';
 import { PluginRegistry } from './extensions/registry';
 import { HistoryProvider } from './history';
@@ -31,10 +32,6 @@ interface CancelSignalLegacy {
     readonly is_set?: boolean;
 }
 
-// Default heartbeat configuration (aligned with Python WorkerConfig)
-const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10;
-const DEFAULT_HEARTBEAT_LEASE_TTL_SECONDS = 30;
-
 export abstract class GatewayWorker {
     public readonly workerId: string;
     protected readonly redis: Redis;
@@ -43,6 +40,7 @@ export abstract class GatewayWorker {
     protected readonly workspaceManager?: WorkspaceManager;
     protected readonly sandbox?: HookSandbox;
     public readonly storage?: FileStorage;
+    private _heartbeat: WorkerHeartbeat | null = null;
 
     public constructor(
         workerId: string,
@@ -64,12 +62,12 @@ export abstract class GatewayWorker {
 
     /** Return the heartbeat interval in seconds. */
     get heartbeatInterval(): number {
-        return DEFAULT_HEARTBEAT_INTERVAL_SECONDS;
+        return RegistryKeys.WORKER_DEFAULT_HEARTBEAT_INTERVAL_SECONDS;
     }
 
     /** Return the worker online lease TTL in seconds. */
     get heartbeatLeaseTtlSeconds(): number {
-        return DEFAULT_HEARTBEAT_LEASE_TTL_SECONDS;
+        return RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS;
     }
 
     abstract getAgentTypes(): ReadonlyArray<string>;
@@ -80,27 +78,23 @@ export abstract class GatewayWorker {
         console.log(`[${this.workerId}] Received cancel request`);
     }
 
-    private heartbeatTimer: NodeJS.Timeout | null = null;
-
     async startHeartbeat(): Promise<void> {
         await this.pluginRegistry.onWorkerStartup(this);
-        // Initial registration
-        await this.registry.registerWorker(this.workerId, [...this.getAgentTypes()]);
-
-        // Periodic refresh using configured interval
-        this.heartbeatTimer = setInterval(async () => {
-            try {
-                await this.registry.registerWorker(this.workerId, [...this.getAgentTypes()]);
-            } catch (err) {
-                console.error(`[${this.workerId}] Heartbeat failed:`, err);
-            }
-        }, this.heartbeatInterval * 1000);
+        this._heartbeat = new WorkerHeartbeat(
+            this.workerId,
+            [...this.getAgentTypes()],
+            this.redis,
+            this.registry,
+            this.heartbeatInterval * 1000,
+            this.heartbeatLeaseTtlSeconds
+        );
+        await this._heartbeat.start();
     }
 
-    stopHeartbeat(): void {
-        if (this.heartbeatTimer) {
-            clearInterval(this.heartbeatTimer);
-            this.heartbeatTimer = null;
+    async stopHeartbeat(): Promise<void> {
+        if (this._heartbeat) {
+            await this._heartbeat.stop();
+            this._heartbeat = null;
         }
     }
 
@@ -164,6 +158,12 @@ export abstract class GatewayWorker {
                 }
             }
 
+            // Pre-processing cancellation check: if cancelled before processing, bail out immediately
+            const cancelSignal = options.cancelSignal as CancelSignalLegacy | AbortSignal | undefined;
+            if (cancelSignal && ((cancelSignal as CancelSignalLegacy).aborted || (cancelSignal as CancelSignalLegacy).is_set)) {
+                throw new TaskCancelledError(options.cancelReason || 'task cancelled before processing');
+            }
+
             if (isResume) {
                 // Persist agent return state
                 await this.persistAgentReturnState(workspacePaths, command);
@@ -207,9 +207,6 @@ export abstract class GatewayWorker {
             if (hasSourceAgent) {
                 permissionTransferred = true;
                 await this.enqueueAgentReturn(command, AgentState.COMPLETED, result);
-                await context.emitState({ state: `${AgentState.QUEUED}: ${sourceAgentType}` });
-            } else {
-                await context.emitState({ state: AgentState.COMPLETED });
             }
             await this.pluginRegistry.onTaskComplete(context, result);
 
@@ -224,11 +221,17 @@ export abstract class GatewayWorker {
             return finalStatus;
         } catch (error: unknown) {
             if (error instanceof TaskCancelledError || (error instanceof Error && error.name === 'TaskCancelledError')) {
-                if (hasSourceAgent) {
+                // Check if parent execution also has cancel_requested — if so, skip callback
+                let shouldCallback = hasSourceAgent;
+                if (shouldCallback && parentMessageId) {
+                    const parentExec = await this.registry.getExecutionByMessageId(parentMessageId, command.header.sessionId);
+                    if (parentExec?.cancel_requested) {
+                        shouldCallback = false;
+                    }
+                }
+                if (shouldCallback) {
                     await this.enqueueAgentReturn(command, AgentState.CANCELLED, { reason: String(error instanceof Error ? error.message : error) });
                 }
-                await context.emitState({ state: AgentState.CANCELLING });
-                await context.emitState({ state: AgentState.CANCELLED });
 
                 const shouldEmitStreamEnd = !hasSourceAgent && !permissionTransferred;
                 if (shouldEmitStreamEnd) {
@@ -243,7 +246,6 @@ export abstract class GatewayWorker {
             if (hasSourceAgent) {
                 await this.enqueueAgentReturn(command, AgentState.FAILED, { error: String(error) });
             }
-            await context.emitState({ state: `${AgentState.FAILED}: ${error}` });
             await this.pluginRegistry.onTaskError(context, err);
 
             const shouldEmitStreamEnd = !hasSourceAgent && !permissionTransferred;

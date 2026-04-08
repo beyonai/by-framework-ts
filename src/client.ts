@@ -176,8 +176,14 @@ export class GatewayClient {
         requestedBy?: string;
         cancelMode?: 'graceful' | 'force';
     }): Promise<CancelTaskResponse> {
-        const execution = await this.registry.getExecutionByMessageId(params.messageId, params.sessionId);
-        if (!execution) {
+        const TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
+
+        // Fetch all session executions for BFS-based cascading cancellation
+        const allExecutions = await this.registry.getAllSessionExecutions(params.sessionId);
+
+        // Find the target execution by message_id
+        const targetExecution = allExecutions.find(e => e.message_id === params.messageId);
+        if (!targetExecution) {
             return {
                 success: false,
                 message_id: params.messageId,
@@ -189,60 +195,109 @@ export class GatewayClient {
             };
         }
 
-        if (execution.session_id !== params.sessionId) {
+        if (targetExecution.session_id !== params.sessionId) {
             return {
                 success: false,
                 message_id: params.messageId,
-                execution_id: execution.execution_id || '',
-                worker_id: execution.worker_id || '',
+                execution_id: targetExecution.execution_id || '',
+                worker_id: targetExecution.worker_id || '',
                 status: ExecutionStatus.NOT_FOUND,
                 timestamp: Date.now(),
                 error: `session mismatch for message_id=${params.messageId}`,
             };
         }
 
-        const executionStatus = execution.status || '';
-        if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(executionStatus)) {
+        // Build parent_message_id -> children map for BFS
+        const childrenMap = new Map<string, Record<string, any>[]>();
+        for (const exec of allExecutions) {
+            const parentMsgId = exec.parent_message_id;
+            if (parentMsgId) {
+                if (!childrenMap.has(parentMsgId)) {
+                    childrenMap.set(parentMsgId, []);
+                }
+                childrenMap.get(parentMsgId)!.push(exec);
+            }
+        }
+
+        // BFS from target to collect all descendant executions
+        const toCancel: Record<string, any>[] = [];
+        const terminalAncestors: Record<string, any>[] = [];
+        const queue = [targetExecution];
+
+        while (queue.length > 0) {
+            const current = queue.shift()!;
+            const status = String(current.status || '');
+
+            if (TERMINAL_STATES.has(status)) {
+                terminalAncestors.push(current);
+            } else {
+                toCancel.push(current);
+            }
+
+            // Enqueue children by message_id
+            const children = childrenMap.get(current.message_id) || [];
+            for (const child of children) {
+                queue.push(child);
+            }
+        }
+
+        // Mark terminal ancestors with cancel_requested (don't change status)
+        const reason = params.reason || '';
+        for (const exec of terminalAncestors) {
+            await this.registry.markCancelRequested(
+                String(exec.execution_id),
+                params.sessionId,
+                reason
+            );
+        }
+
+        if (toCancel.length === 0) {
             return {
                 success: false,
                 message_id: params.messageId,
-                execution_id: execution.execution_id || '',
-                worker_id: execution.worker_id || '',
+                execution_id: targetExecution.execution_id || '',
+                worker_id: targetExecution.worker_id || '',
                 status: ExecutionStatus.ALREADY_FINISHED,
                 timestamp: Date.now(),
-                error: `execution already in terminal state: ${executionStatus}`,
+                error: `all executions already in terminal state`,
             };
         }
 
-        const executionId = String(execution.execution_id);
-        const workerId = String(execution.worker_id);
-        const reason = params.reason || '';
-        await this.registry.markExecutionCancelling(executionId, params.sessionId, reason);
+        // Cancel all non-terminal descendants
+        let cancelledCount = 0;
+        for (const exec of toCancel) {
+            const executionId = String(exec.execution_id);
+            const workerId = String(exec.worker_id || '');
 
-        const cancelCommand = new CancelTaskCommand(
-            new MessageHeader(`msg-cancel-${uuidv4().slice(0, 8)}`, params.sessionId, uuidv4().replace(/-/g, ''), {
-                targetAgentType: params.targetAgentType || execution.target_agent_type || '',
-                parentMessageId: params.messageId,
-            }),
-            params.messageId,
-            executionId,
-            workerId,
-            reason,
-            params.requestedBy || 'client',
-            params.cancelMode || 'graceful'
-        );
+            await this.registry.markExecutionCancelling(executionId, params.sessionId, reason);
 
-        if (workerId) {
-            await this.sendCommand(cancelCommand, QueueNames.worker_ctrl_stream(workerId));
+            const cancelCommand = new CancelTaskCommand(
+                new MessageHeader(`msg-cancel-${uuidv4().slice(0, 8)}`, params.sessionId, uuidv4().replace(/-/g, ''), {
+                    targetAgentType: params.targetAgentType || exec.target_agent_type || '',
+                    parentMessageId: exec.message_id,
+                }),
+                exec.message_id,
+                executionId,
+                workerId,
+                reason,
+                params.requestedBy || 'client',
+                params.cancelMode || 'graceful'
+            );
+
+            if (workerId) {
+                await this.sendCommand(cancelCommand, QueueNames.worker_ctrl_stream(workerId));
+            }
+            cancelledCount++;
         }
 
         return {
             success: true,
             message_id: params.messageId,
-            execution_id: executionId,
-            worker_id: workerId,
+            execution_id: String(targetExecution.execution_id),
+            worker_id: String(targetExecution.worker_id || ''),
             status: ExecutionStatus.CANCEL_REQUESTED,
             timestamp: Date.now(),
+            cancelled_count: cancelledCount,
         };
     }
 
@@ -281,7 +336,7 @@ export class GatewayClient {
                     target_worker_id: params.targetWorkerId || '',
                     timestamp: Date.now(),
                     error: error,
-                    error_code: ExecutionStatus.ERR_WORKER_NOT_ALIVE,
+                    error_code: ExecutionStatus.ERR_WORKER_NOT_ONLINE,
                 };
             }
             return {

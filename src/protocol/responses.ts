@@ -24,6 +24,7 @@ export interface CancelTaskResponse {
     status: string;
     timestamp: number;
     error?: string;
+    cancelled_count?: number;
 }
 
 /**
@@ -42,7 +43,8 @@ export class ExecutionStatus {
     static readonly SESSION_MISMATCH = 'SESSION_MISMATCH';
 
     // Failure error codes for SendMessageResponse
-    static readonly ERR_AGENT_TYPE_NOT_FOUND = 'AGENT_TYPE_NOT_FOUND';
-    static readonly ERR_WORKER_NOT_ALIVE = 'WORKER_NOT_ALIVE';
+    static readonly ERR_AGENT_TYPE_UNAVAILABLE = 'AGENT_TYPE_UNAVAILABLE';
+    static readonly ERR_AGENT_TYPE_NOT_FOUND = ExecutionStatus.ERR_AGENT_TYPE_UNAVAILABLE;
+    static readonly ERR_WORKER_NOT_ONLINE = 'WORKER_NOT_ONLINE';
     static readonly ERR_REGISTRY_NOT_SET = 'REGISTRY_NOT_SET';
 }

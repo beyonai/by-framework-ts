@@ -98,7 +98,7 @@ describe('GatewayWorker', () => {
         expect(result).toBe(AgentState.CANCELLED);
     });
 
-    test('cancelled worker emits CANCELLING then CANCELLED state events', async () => {
+    test('cancelled worker returns CANCELLED without emitting state events', async () => {
         const redis = new MockRedis();
         const worker = createWorker(async () => {
             throw new TaskCancelledError('timeout');
@@ -111,8 +111,10 @@ describe('GatewayWorker', () => {
             'cancel state test'
         );
 
-        await worker.handleMessage(command);
+        const result = await worker.handleMessage(command);
+        expect(result).toBe(AgentState.CANCELLED);
 
+        // After removing emitState calls, no CANCELLING/CANCELLED state events should be emitted
         const statePayloads = redis.calls
             .filter((c) => c.name.includes('sess-3'))
             .map((c) => JSON.parse(c.payload));
@@ -121,8 +123,7 @@ describe('GatewayWorker', () => {
             .map((p) => p.data?.choices?.[0]?.delta?.content)
             .filter(Boolean);
 
-        expect(states.some((s: string) => s.includes(AgentState.CANCELLING))).toBe(true);
-        expect(states.some((s: string) => s.includes(AgentState.CANCELLED))).toBe(true);
+        expect(states.some((s: string) => s.includes(AgentState.CANCELLING))).toBe(false);
     });
 
     test('handleMessage returns FAILED on regular error', async () => {
