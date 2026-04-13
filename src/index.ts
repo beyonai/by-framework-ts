@@ -29,4 +29,5 @@ export * from './byai_client';
 export * from './extensions';
 export * from './exceptions';
 export * from './runtime';
+export * from './http_client';
 export * from './discovery';

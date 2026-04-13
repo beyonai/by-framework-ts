@@ -203,3 +203,12 @@ export class HttpRequestError extends GatewaySDKError {
     this.url = url;
   }
 }
+
+// === Service Discovery Exceptions ===
+
+export class DiscoveryHttpClientError extends HttpClientError {
+  constructor(message: string) {
+    super(message, '');
+    this.name = 'DiscoveryHttpClientError';
+  }
+}
