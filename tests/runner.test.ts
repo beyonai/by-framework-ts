@@ -9,6 +9,7 @@ class MockRedisRunner {
     public ackCalls: Array<[string, string, string]> = [];
     public groupCreateCalls: Array<[string, string, string, string]> = [];
     public xaddCalls: Array<any[]> = [];
+    public xreadgroupCalls: any[][] = [];
 
     async xack(name: string, groupName: string, msgId: string): Promise<number> {
         this.ackCalls.push([name, groupName, msgId]);
@@ -23,6 +24,11 @@ class MockRedisRunner {
     async xadd(...args: any[]): Promise<string> {
         this.xaddCalls.push(args);
         return '1-0';
+    }
+
+    async xreadgroup(...args: any[]): Promise<null> {
+        this.xreadgroupCalls.push(args);
+        return null;
     }
 
     pipeline() {
@@ -40,6 +46,16 @@ class MockRedisRunner {
             }
         };
         return pipe;
+    }
+}
+
+class MockRedisRunnerWithDuplicate extends MockRedisRunner {
+    public duplicates: MockRedisRunner[] = [];
+
+    duplicate(): MockRedisRunner {
+        const child = new MockRedisRunner();
+        this.duplicates.push(child);
+        return child;
     }
 }
 
@@ -244,5 +260,23 @@ describe('WorkerRunner cancellation flow', () => {
             worker_id: 'worker-1',
             status: 'RUNNING',
         }));
+    });
+
+    test('uses dedicated Redis duplicates for blocking task and control reads', async () => {
+        const redis = new MockRedisRunnerWithDuplicate();
+        const registry = new TestRegistry();
+        const worker = new SlowWorker('worker-1', registry as any, redis as any);
+        const runner = new WorkerRunner(worker, { redisClient: redis as any, groupName: 'test-group' });
+
+        expect(redis.duplicates).toHaveLength(2);
+        expect((runner as any).streamReadRedis).toBe(redis.duplicates[0]);
+        expect((runner as any).controlReadRedis).toBe(redis.duplicates[1]);
+
+        await runner.poll({ block: 1 });
+        await runner.runControlOnce(1);
+
+        expect(redis.xreadgroupCalls).toHaveLength(0);
+        expect(redis.duplicates[0].xreadgroupCalls).toHaveLength(1);
+        expect(redis.duplicates[1].xreadgroupCalls).toHaveLength(1);
     });
 });

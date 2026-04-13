@@ -22,6 +22,11 @@ interface RunningExecution {
 
 export class WorkerRunner {
     private redis: Redis;
+    private readonly ownsRedis: boolean;
+    private readonly streamReadRedis: Redis;
+    private readonly ownsStreamReadRedis: boolean;
+    private readonly controlReadRedis: Redis;
+    private readonly ownsControlReadRedis: boolean;
     private worker: GatewayWorker;
     private groupName: string;
     private consumerName: string;
@@ -62,13 +67,56 @@ export class WorkerRunner {
         } else {
             this.worker = workerOrOptions as GatewayWorker;
         }
-        // IMPORTANT: Use a dedicated Redis connection for the runner (polling)
-        // to avoid blocking the main connection used by the worker for emitting chunks.
+        this.ownsRedis = !options.redisClient;
         this.redis = options.redisClient || createRedis();
+        const streamReader = this.createBlockingRedisConnection();
+        this.streamReadRedis = streamReader.client;
+        this.ownsStreamReadRedis = streamReader.owned;
+        const controlReader = this.createBlockingRedisConnection();
+        this.controlReadRedis = controlReader.client;
+        this.ownsControlReadRedis = controlReader.owned;
         this.groupName = options.groupName || this.autoGroupName();
         this.consumerName = this.worker.workerId;
         this.maxConcurrency = options.maxConcurrency ?? 50;
         this.fetchCount = options.fetchCount ?? 10;
+    }
+
+    private createBlockingRedisConnection(): { client: Redis; owned: boolean } {
+        const duplicate = (this.redis as unknown as { duplicate?: () => Redis }).duplicate;
+        if (typeof duplicate === 'function') {
+            return {
+                client: duplicate.call(this.redis),
+                owned: true,
+            };
+        }
+        return {
+            client: this.redis,
+            owned: false,
+        };
+    }
+
+    private async closeRedisConnection(client: Redis, owned: boolean): Promise<void> {
+        if (!owned) {
+            return;
+        }
+
+        const maybeClient = client as unknown as {
+            quit?: () => Promise<unknown>;
+            disconnect?: () => void;
+        };
+
+        try {
+            if (typeof maybeClient.quit === 'function') {
+                await maybeClient.quit();
+                return;
+            }
+        } catch {
+            // Fall back to a hard disconnect if graceful quit fails.
+        }
+
+        if (typeof maybeClient.disconnect === 'function') {
+            maybeClient.disconnect();
+        }
     }
 
     private autoGroupName(): string {
@@ -159,6 +207,9 @@ export class WorkerRunner {
             await this.controlTask.catch(() => undefined);
             this.controlTask = null;
         }
+        await this.closeRedisConnection(this.controlReadRedis, this.ownsControlReadRedis);
+        await this.closeRedisConnection(this.streamReadRedis, this.ownsStreamReadRedis);
+        await this.closeRedisConnection(this.redis, this.ownsRedis);
     }
 
     async poll(options: { count?: number; block?: number } = {}): Promise<{ streamName: string; msgId: string; data: GatewayCommand }[]> {
@@ -182,7 +233,7 @@ export class WorkerRunner {
 
         if (streams.length === 0) return [];
 
-        const result = (await this.redis.xreadgroup(
+        const result = (await this.streamReadRedis.xreadgroup(
             'GROUP',
             this.groupName,
             this.consumerName,
@@ -355,7 +406,7 @@ export class WorkerRunner {
 
     async runControlOnce(block: number = 2000): Promise<GatewayCommand[]> {
         const streamName = QueueNames.worker_ctrl_stream(this.worker.workerId);
-        const result = (await this.redis.xreadgroup(
+        const result = (await this.controlReadRedis.xreadgroup(
             'GROUP',
             this.groupName,
             this.consumerName,
