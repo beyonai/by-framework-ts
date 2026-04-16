@@ -561,6 +561,7 @@ export class ByHttpClient {
         url: string,
         filePath: string,
         params?: {
+            fileField?: string;
             headers?: Record<string, string>;
             formFields?: Record<string, string>;
         }
@@ -575,11 +576,12 @@ export class ByHttpClient {
         url: string,
         filePaths: string[],
         params?: {
+            fileField?: string;
             headers?: Record<string, string>;
             formFields?: Record<string, string>;
         }
     ): Promise<HttpResponse> {
-        const { headers: requestHeaders, formFields } = params || {};
+        const { fileField = 'file', headers: requestHeaders, formFields } = params || {};
 
         const fullUrl = this.buildUrl(url);
         const mergedHeaders = { ...this.defaultHeaders };
@@ -599,7 +601,7 @@ export class ByHttpClient {
             const fileContent = fs.readFileSync(filePath);
             const fileName = path.basename(filePath);
             const blob = new Blob([fileContent]);
-            formData.append('file', blob, fileName);
+            formData.append(fileField, blob, fileName);
         }
 
         const controller = new AbortController();
@@ -643,12 +645,13 @@ export class ByHttpClient {
         fileName: string,
         content: Buffer,
         params?: {
+            fileField?: string;
             contentType?: string;
             headers?: Record<string, string>;
             formFields?: Record<string, string>;
         }
     ): Promise<HttpResponse> {
-        const { contentType = 'application/octet-stream', headers: requestHeaders, formFields } = params || {};
+        const { fileField = 'file', contentType = 'application/octet-stream', headers: requestHeaders, formFields } = params || {};
 
         const fullUrl = this.buildUrl(url);
         const mergedHeaders = { ...this.defaultHeaders };
@@ -666,7 +669,7 @@ export class ByHttpClient {
             }
         }
         const blob = new Blob([content], { type: contentType });
-        formData.append('file', blob, fileName);
+        formData.append(fileField, blob, fileName);
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.timeout * 1000);

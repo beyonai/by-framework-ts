@@ -261,6 +261,7 @@ export class DiscoveryHttpClient {
         path: string,
         filePath: string,
         params?: {
+            fileField?: string;
             headers?: Record<string, string>;
             formFields?: Record<string, string>;
             retryCount?: number;
@@ -277,12 +278,13 @@ export class DiscoveryHttpClient {
         path: string,
         filePaths: string[],
         params?: {
+            fileField?: string;
             headers?: Record<string, string>;
             formFields?: Record<string, string>;
             retryCount?: number;
         }
     ): Promise<HttpResponse> {
-        const { headers, formFields, retryCount = 0 } = params || {};
+        const { fileField, headers, formFields, retryCount = 0 } = params || {};
 
         const instance = await this.discoveryClient.discover(serviceName);
         if (!instance) {
@@ -298,6 +300,7 @@ export class DiscoveryHttpClient {
 
         try {
             const response = await this.httpClient.uploadMultiple(absoluteUrl, filePaths, {
+                fileField,
                 headers,
                 formFields,
             });
@@ -336,6 +339,7 @@ export class DiscoveryHttpClient {
             );
             await new Promise(resolve => setTimeout(resolve, delay * 1000));
             return this.uploadMultiple(serviceName, path, filePaths, {
+                fileField,
                 headers,
                 formFields,
                 retryCount: attempt,
@@ -362,13 +366,14 @@ export class DiscoveryHttpClient {
         fileName: string,
         content: Buffer,
         params?: {
+            fileField?: string;
             contentType?: string;
             headers?: Record<string, string>;
             formFields?: Record<string, string>;
             retryCount?: number;
         }
     ): Promise<HttpResponse> {
-        const { contentType, headers, formFields, retryCount = 0 } = params || {};
+        const { fileField, contentType, headers, formFields, retryCount = 0 } = params || {};
 
         const instance = await this.discoveryClient.discover(serviceName);
         if (!instance) {
@@ -384,6 +389,7 @@ export class DiscoveryHttpClient {
 
         try {
             const response = await this.httpClient.uploadWithStream(absoluteUrl, fileName, content, {
+                fileField,
                 contentType,
                 headers,
                 formFields,
@@ -423,6 +429,7 @@ export class DiscoveryHttpClient {
             );
             await new Promise(resolve => setTimeout(resolve, delay * 1000));
             return this.uploadWithStream(serviceName, path, fileName, content, {
+                fileField,
                 contentType,
                 headers,
                 formFields,
