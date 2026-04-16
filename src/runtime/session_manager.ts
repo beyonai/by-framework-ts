@@ -11,19 +11,22 @@ import { InMemoryHistoryBackend } from './history';
 
 export class SessionManager {
   private readonly sessionId: string;
-  private readonly tenantId?: string;
+  private readonly userCode?: string;
+  private readonly userName?: string;
   private readonly fileManager: FileManager;
   private historyBackend: BaseHistoryBackend;
   private messageCount = 0;
 
   constructor(
     sessionId: string,
-    tenantId?: string,
+    userCode?: string,
+    userName?: string,
     storage?: FileStorage,
     workspaceDir?: string
   ) {
     this.sessionId = sessionId;
-    this.tenantId = tenantId;
+    this.userCode = userCode;
+    this.userName = userName;
     this.fileManager = new FileManager(sessionId, storage, workspaceDir);
     this.historyBackend = new InMemoryHistoryBackend();
   }
@@ -32,8 +35,12 @@ export class SessionManager {
     return this.sessionId;
   }
 
-  get tenant_id(): string | undefined {
-    return this.tenantId;
+  get user_code(): string | undefined {
+    return this.userCode;
+  }
+  
+  get user_name(): string | undefined {
+    return this.userName;
   }
 
   get file_manager(): FileManager {

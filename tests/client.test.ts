@@ -68,7 +68,7 @@ describe('GatewayClient', () => {
                 targetAgentType: 'demo-agent-ts',
                 sessionId: 'test-session-ts',
                 content: 'Hello from verification script!',
-                tenantId: 'test-tenant'
+                userCode: 'test-tenant'
             });
 
             expect(response.success).toBe(true);
@@ -81,7 +81,8 @@ describe('GatewayClient', () => {
             expect(serializedMsg.action_type).toBe(ActionType.ASK_AGENT);
             expect(serializedMsg.header.target_agent_type).toBe('demo-agent-ts');
             expect(serializedMsg.header.session_id).toBe('test-session-ts');
-            expect(serializedMsg.header.tenant_id).toBe('test-tenant');
+            expect(serializedMsg.header.user_code).toBe('test-tenant');
+            expect(serializedMsg.header.user_name).toBe('');
             expect(serializedMsg.body.content).toBe('Hello from verification script!');
             expect(serializedMsg.body.wait_for_reply).toBe(false);
             expect((client as any).registry.saveExecution).toHaveBeenCalledWith(

@@ -47,7 +47,7 @@ const res = await client.sendMessage({
     targetAgentType: 'agent-type-a',
     sessionId: 'test-session',
     content: 'Hello!',
-    tenantId: 'test-tenant'
+    userCode: 'test-tenant'
 });
 ```
 
@@ -173,7 +173,7 @@ new GatewayClient(registry?: WorkerRegistry, redisClient?: Redis)
 | params.content | `string \| BaiYingMessage \| BaiYingMessage[]` | 是 | 消息内容 |
 | params.sourceAgentType | `string` | 否 | 源 Agent ID |
 | params.traceId | `string` | 否 | 追踪 ID，自动生成 |
-| params.tenantId | `string` | 否 | 租户 ID |
+| params.userCode | `string` | 否 | 租户 ID |
 | params.actionType | `ActionType` | 否 | 动作类型 |
 | params.payload | `Record<string, any>` | 否 | 额外载荷 |
 | params.parentMessageId | `string` | 否 | 父消息 ID |

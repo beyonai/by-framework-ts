@@ -88,7 +88,7 @@ describe('ByaiMessageInterceptor', () => {
             targetAgentType: 'agent-x',
             sessionId: 'sess-1',
             content: 'test',
-            tenantId: 'tenant-1',
+            userCode: 'tenant-1',
             actionType: 'ASK_AGENT',
             parentMessageId: 'parent-1',
             metadata: { key: 'value' },
@@ -96,7 +96,7 @@ describe('ByaiMessageInterceptor', () => {
 
         expect(result.targetAgentType).toBe('agent-x');
         expect(result.sessionId).toBe('sess-1');
-        expect(result.tenantId).toBe('tenant-1');
+        expect(result.userCode).toBe('tenant-1');
         expect(result.actionType).toBe('ASK_AGENT');
         expect(result.parentMessageId).toBe('parent-1');
         expect(result.metadata.key).toBe('value');

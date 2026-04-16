@@ -42,7 +42,7 @@ describe('command wire format', () => {
         const command = new AskAgentCommand(
             new MessageHeader('msg-1', 'sess-1', 'trace-1', {
                 targetAgentType: 'demo-agent-ts',
-                tenantId: 'tenant-1',
+                userCode: 'tenant-1',
             }),
             'hello world',
             false,
@@ -59,7 +59,8 @@ describe('command wire format', () => {
                 target_agent_type: 'demo-agent-ts',
                 parent_message_id: '',
                 task_group_id: '',
-                tenant_id: 'tenant-1',
+                user_code: 'tenant-1',
+                user_name: '',
                 metadata: {},
             },
             body: {
@@ -80,7 +81,8 @@ describe('command wire format', () => {
                 source_agent_id: 'agent-a',
                 target_agent_type: 'agent-b',
                 parent_message_id: 'msg-1',
-                tenant_id: '',
+                user_code: '',
+                user_name: '',
                 metadata: {},
             },
             body: {
@@ -107,7 +109,8 @@ describe('command wire format', () => {
                 source_agent_id: '',
                 target_agent_type: 'demo-agent-ts',
                 parent_message_id: 'msg-task-1',
-                tenant_id: '',
+                user_code: '',
+                user_name: '',
                 metadata: {},
             },
             body: {
@@ -140,7 +143,8 @@ describe('command wire format', () => {
                     source_agent_id: '',
                     target_agent_type: 'custom-agent',
                     parent_message_id: '',
-                    tenant_id: '',
+                    user_code: '',
+                    user_name: '',
                     metadata: {},
                 },
                 body: {

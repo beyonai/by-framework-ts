@@ -3,7 +3,8 @@ export interface MessageHeaderOptions {
     targetAgentType?: string;
     parentMessageId?: string;
     taskGroupId?: string;
-    tenantId?: string;
+    userCode?: string;
+    userName?: string;
     metadata?: Record<string, any>;
 }
 
@@ -18,7 +19,8 @@ export class MessageHeader {
         this.targetAgentType = options.targetAgentType || '';
         this.parentMessageId = options.parentMessageId || '';
         this.taskGroupId = options.taskGroupId || '';
-        this.tenantId = options.tenantId || '';
+        this.userCode = options.userCode || '';
+        this.userName = options.userName || '';
         this.metadata = options.metadata || {};
     }
 
@@ -26,7 +28,8 @@ export class MessageHeader {
     public readonly targetAgentType: string;
     public readonly parentMessageId: string;
     public readonly taskGroupId: string;
-    public readonly tenantId: string;
+    public readonly userCode: string;
+    public readonly userName: string;
     public readonly metadata: Record<string, any>;
 
     toDict(): Record<string, any> {
@@ -38,7 +41,8 @@ export class MessageHeader {
             target_agent_type: this.targetAgentType,
             parent_message_id: this.parentMessageId,
             task_group_id: this.taskGroupId,
-            tenant_id: this.tenantId,
+            user_code: this.userCode,
+            user_name: this.userName,
             metadata: { ...this.metadata },
         };
     }
@@ -49,7 +53,8 @@ export class MessageHeader {
             targetAgentType: data.target_agent_type || '',
             parentMessageId: data.parent_message_id || '',
             taskGroupId: data.task_group_id || '',
-            tenantId: data.tenant_id || '',
+            userCode: data.user_code || '',
+            userName: data.user_name || '',
             metadata: { ...(data.metadata || {}) },
         });
     }

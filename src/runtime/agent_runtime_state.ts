@@ -17,14 +17,16 @@ export class AgentRuntimeState {
 
   constructor(options: {
     sessionId: string;
-    tenantId?: string;
+    userCode?: string;
+    userName?: string;
     storage?: FileStorage;
     workspaceDir?: string;
     agentConfigs?: AgentConfig[];
   }) {
     this.sessionManager = new SessionManager(
       options.sessionId,
-      options.tenantId,
+      options.userCode,
+      options.userName,
       options.storage,
       options.workspaceDir
     );

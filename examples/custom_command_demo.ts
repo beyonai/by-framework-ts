@@ -74,7 +74,7 @@ async function sendCustomCommand(): Promise<void> {
     const command = new CustomAuditCommand(
         new MessageHeader('msg-custom-audit-1', 'sess-custom-audit', 'trace-custom-audit', {
             targetAgentType: 'custom-audit-agent-ts',
-            tenantId: 'demo-tenant',
+            userCode: 'demo-tenant',
             metadata: { source: 'ts-example' },
         }),
         'audit-001',

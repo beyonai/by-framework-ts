@@ -22,7 +22,8 @@ interface SendMessageParams {
     readonly content: string | BaiYingMessage | ReadonlyArray<BaiYingMessage>;
     readonly sourceAgentType?: string;
     readonly traceId?: string;
-    readonly tenantId?: string;
+    readonly userCode?: string;
+    readonly userName?: string;
     readonly actionType?: ActionType;
     readonly extraPayload?: Readonly<Record<string, unknown>>;
     readonly parentMessageId?: string;
@@ -308,7 +309,8 @@ export class GatewayClient {
         let requestParams: Record<string, any> = {
             targetAgentType: params.targetAgentType,
             sessionId: params.sessionId,
-            tenantId: params.tenantId || '',
+            userCode: params.userCode || '',
+            userName: params.userName || '',
             content: params.content,
             actionType: params.actionType || ActionType.ASK_AGENT,
             parentMessageId: params.parentMessageId || '',
@@ -385,7 +387,8 @@ export class GatewayClient {
             sourceAgentType: params.sourceAgentType || '',
             targetAgentType: requestParams.targetAgentType,
             parentMessageId: requestParams.parentMessageId || '',
-            tenantId: requestParams.tenantId || '',
+            userCode: requestParams.userCode || '',
+            userName: requestParams.userName || '',
             metadata: requestParams.metadata,
         });
 

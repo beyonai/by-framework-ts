@@ -117,7 +117,8 @@ describe('Protocol layer', () => {
                 targetAgentType: 'tgt-agent',
                 parentMessageId: 'parent-1',
                 taskGroupId: 'grp-1',
-                tenantId: 'tenant-1',
+                userCode: 'tenant-1',
+                userName: 'user-1',
                 metadata: { key: 'value' },
             });
 
@@ -129,7 +130,8 @@ describe('Protocol layer', () => {
             expect(dict.target_agent_type).toBe('tgt-agent');
             expect(dict.parent_message_id).toBe('parent-1');
             expect(dict.task_group_id).toBe('grp-1');
-            expect(dict.tenant_id).toBe('tenant-1');
+            expect(dict.user_code).toBe('tenant-1');
+            expect(dict.user_name).toBe('user-1');
             expect(dict.metadata).toEqual({ key: 'value' });
         });
 

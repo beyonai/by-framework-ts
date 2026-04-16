@@ -16,7 +16,7 @@ async function main() {
         targetAgentType: 'demo-agent-ts',
         sessionId: 'test-session-ts',
         content: 'Hello from verification script!',
-        tenantId: 'test-tenant'
+        userCode: 'test-tenant'
     });
 
     console.log('Send result:', res);
