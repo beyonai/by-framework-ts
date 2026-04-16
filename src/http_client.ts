@@ -549,4 +549,155 @@ export class ByHttpClient {
     ): Promise<HttpResponse> {
         return this.request('DELETE', url, params);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // File Upload Methods
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Upload a file using multipart/form-data.
+     */
+    async upload(
+        url: string,
+        filePath: string,
+        params?: {
+            headers?: Record<string, string>;
+            formFields?: Record<string, string>;
+        }
+    ): Promise<HttpResponse> {
+        return this.uploadMultiple(url, [filePath], params);
+    }
+
+    /**
+     * Upload multiple files using multipart/form-data.
+     */
+    async uploadMultiple(
+        url: string,
+        filePaths: string[],
+        params?: {
+            headers?: Record<string, string>;
+            formFields?: Record<string, string>;
+        }
+    ): Promise<HttpResponse> {
+        const { headers: requestHeaders, formFields } = params || {};
+
+        const fullUrl = this.buildUrl(url);
+        const mergedHeaders = { ...this.defaultHeaders };
+        this.auth.apply(mergedHeaders);
+        if (requestHeaders) {
+            Object.assign(mergedHeaders, requestHeaders);
+        }
+
+        // Build multipart form data
+        const formData = new FormData();
+        if (formFields) {
+            for (const [key, value] of Object.entries(formFields)) {
+                formData.append(key, value);
+            }
+        }
+        for (const filePath of filePaths) {
+            const fileContent = fs.readFileSync(filePath);
+            const fileName = path.basename(filePath);
+            const blob = new Blob([fileContent]);
+            formData.append('file', blob, fileName);
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.timeout * 1000);
+
+        try {
+            const response = await fetch(fullUrl, {
+                method: 'POST',
+                headers: mergedHeaders,
+                body: formData,
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            return await this.parseResponse(response);
+
+        } catch (error: unknown) {
+            clearTimeout(timeoutId);
+
+            let errorMessage: string;
+            if (error instanceof DOMException && error.name === 'AbortError') {
+                errorMessage = `Upload timeout after ${this.timeout}s`;
+            } else if (error instanceof TypeError) {
+                errorMessage = `Upload connection error: ${error.message}`;
+            } else if (error instanceof Error) {
+                errorMessage = `Upload error: ${error.message}`;
+            } else {
+                errorMessage = `Upload unknown error: ${String(error)}`;
+            }
+
+            console.warn(`[POST] ${fullUrl} error: ${errorMessage}`);
+            throw new HttpRequestError(errorMessage, fullUrl, error instanceof Error ? error : new Error(String(error)));
+        }
+    }
+
+    /**
+     * Upload a file from bytes using multipart/form-data.
+     */
+    async uploadWithStream(
+        url: string,
+        fileName: string,
+        content: Buffer,
+        params?: {
+            contentType?: string;
+            headers?: Record<string, string>;
+            formFields?: Record<string, string>;
+        }
+    ): Promise<HttpResponse> {
+        const { contentType = 'application/octet-stream', headers: requestHeaders, formFields } = params || {};
+
+        const fullUrl = this.buildUrl(url);
+        const mergedHeaders = { ...this.defaultHeaders };
+        this.auth.apply(mergedHeaders);
+        if (requestHeaders) {
+            Object.assign(mergedHeaders, requestHeaders);
+        }
+        // Let the browser set Content-Type with boundary for multipart
+        delete mergedHeaders['Content-Type'];
+
+        const formData = new FormData();
+        if (formFields) {
+            for (const [key, value] of Object.entries(formFields)) {
+                formData.append(key, value);
+            }
+        }
+        const blob = new Blob([content], { type: contentType });
+        formData.append('file', blob, fileName);
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.timeout * 1000);
+
+        try {
+            const response = await fetch(fullUrl, {
+                method: 'POST',
+                headers: mergedHeaders,
+                body: formData,
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            return await this.parseResponse(response);
+
+        } catch (error: unknown) {
+            clearTimeout(timeoutId);
+
+            let errorMessage: string;
+            if (error instanceof DOMException && error.name === 'AbortError') {
+                errorMessage = `Upload timeout after ${this.timeout}s`;
+            } else if (error instanceof TypeError) {
+                errorMessage = `Upload connection error: ${error.message}`;
+            } else if (error instanceof Error) {
+                errorMessage = `Upload error: ${error.message}`;
+            } else {
+                errorMessage = `Upload unknown error: ${String(error)}`;
+            }
+
+            console.warn(`[POST] ${fullUrl} error: ${errorMessage}`);
+            throw new HttpRequestError(errorMessage, fullUrl, error instanceof Error ? error : new Error(String(error)));
+        }
+    }
 }

@@ -250,6 +250,198 @@ export class DiscoveryHttpClient {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // File Upload Methods (with service discovery)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Upload a file using multipart/form-data with service discovery.
+     */
+    async upload(
+        serviceName: string,
+        path: string,
+        filePath: string,
+        params?: {
+            headers?: Record<string, string>;
+            formFields?: Record<string, string>;
+            retryCount?: number;
+        }
+    ): Promise<HttpResponse> {
+        return this.uploadMultiple(serviceName, path, [filePath], params);
+    }
+
+    /**
+     * Upload multiple files using multipart/form-data with service discovery.
+     */
+    async uploadMultiple(
+        serviceName: string,
+        path: string,
+        filePaths: string[],
+        params?: {
+            headers?: Record<string, string>;
+            formFields?: Record<string, string>;
+            retryCount?: number;
+        }
+    ): Promise<HttpResponse> {
+        const { headers, formFields, retryCount = 0 } = params || {};
+
+        const instance = await this.discoveryClient.discover(serviceName);
+        if (!instance) {
+            throw new DiscoveryHttpClientError(
+                `No available instances for service: ${serviceName}`
+            );
+        }
+
+        const normalizedPath = path.replace(/^\/+/, '');
+        const absoluteUrl = `http://${instance.host}:${instance.port}/${normalizedPath}`;
+        const attempt = retryCount + 1;
+        let lastError: Error | null = null;
+
+        try {
+            const response = await this.httpClient.uploadMultiple(absoluteUrl, filePaths, {
+                headers,
+                formFields,
+            });
+
+            if (
+                response.isSuccess ||
+                !this.retryConfig.retryOnStatusCodes.includes(response.statusCode)
+            ) {
+                return response;
+            }
+
+            console.warn(
+                `[UPLOAD] ${absoluteUrl} -> ${response.statusCode}, switching node and retrying...`
+            );
+
+        } catch (error: unknown) {
+            if (error instanceof HttpRequestError) {
+                lastError = error;
+                console.warn(
+                    `[UPLOAD] ${absoluteUrl} network error (attempt ${attempt}): ${error.message}`
+                );
+            } else if (error instanceof Error) {
+                lastError = error;
+                console.warn(
+                    `[UPLOAD] ${absoluteUrl} error (attempt ${attempt}): ${error.message}`
+                );
+            } else {
+                lastError = new Error(String(error));
+            }
+        }
+
+        if (attempt < this.retryConfig.maxAttempts) {
+            const delay = calculateDelay(attempt, this.retryConfig);
+            console.warn(
+                `Node-switching retry in ${delay.toFixed(1)}s for service ${serviceName}`
+            );
+            await new Promise(resolve => setTimeout(resolve, delay * 1000));
+            return this.uploadMultiple(serviceName, path, filePaths, {
+                headers,
+                formFields,
+                retryCount: attempt,
+            });
+        }
+
+        if (lastError) {
+            throw new DiscoveryHttpClientError(
+                `Service upload failed after ${this.retryConfig.maxAttempts} attempts: ${lastError}`
+            );
+        }
+
+        throw new DiscoveryHttpClientError(
+            `Service upload failed after ${this.retryConfig.maxAttempts} attempts.`
+        );
+    }
+
+    /**
+     * Upload a file from bytes using multipart/form-data with service discovery.
+     */
+    async uploadWithStream(
+        serviceName: string,
+        path: string,
+        fileName: string,
+        content: Buffer,
+        params?: {
+            contentType?: string;
+            headers?: Record<string, string>;
+            formFields?: Record<string, string>;
+            retryCount?: number;
+        }
+    ): Promise<HttpResponse> {
+        const { contentType, headers, formFields, retryCount = 0 } = params || {};
+
+        const instance = await this.discoveryClient.discover(serviceName);
+        if (!instance) {
+            throw new DiscoveryHttpClientError(
+                `No available instances for service: ${serviceName}`
+            );
+        }
+
+        const normalizedPath = path.replace(/^\/+/, '');
+        const absoluteUrl = `http://${instance.host}:${instance.port}/${normalizedPath}`;
+        const attempt = retryCount + 1;
+        let lastError: Error | null = null;
+
+        try {
+            const response = await this.httpClient.uploadWithStream(absoluteUrl, fileName, content, {
+                contentType,
+                headers,
+                formFields,
+            });
+
+            if (
+                response.isSuccess ||
+                !this.retryConfig.retryOnStatusCodes.includes(response.statusCode)
+            ) {
+                return response;
+            }
+
+            console.warn(
+                `[UPLOAD] ${absoluteUrl} -> ${response.statusCode}, switching node and retrying...`
+            );
+
+        } catch (error: unknown) {
+            if (error instanceof HttpRequestError) {
+                lastError = error;
+                console.warn(
+                    `[UPLOAD] ${absoluteUrl} network error (attempt ${attempt}): ${error.message}`
+                );
+            } else if (error instanceof Error) {
+                lastError = error;
+                console.warn(
+                    `[UPLOAD] ${absoluteUrl} error (attempt ${attempt}): ${error.message}`
+                );
+            } else {
+                lastError = new Error(String(error));
+            }
+        }
+
+        if (attempt < this.retryConfig.maxAttempts) {
+            const delay = calculateDelay(attempt, this.retryConfig);
+            console.warn(
+                `Node-switching retry in ${delay.toFixed(1)}s for service ${serviceName}`
+            );
+            await new Promise(resolve => setTimeout(resolve, delay * 1000));
+            return this.uploadWithStream(serviceName, path, fileName, content, {
+                contentType,
+                headers,
+                formFields,
+                retryCount: attempt,
+            });
+        }
+
+        if (lastError) {
+            throw new DiscoveryHttpClientError(
+                `Service upload failed after ${this.retryConfig.maxAttempts} attempts: ${lastError}`
+            );
+        }
+
+        throw new DiscoveryHttpClientError(
+            `Service upload failed after ${this.retryConfig.maxAttempts} attempts.`
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Convenience methods
     // ─────────────────────────────────────────────────────────────────────────
 
