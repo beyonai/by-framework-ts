@@ -284,6 +284,9 @@ export class AgentContext {
                 message_id: messageId,
                 parent_message_id: parentMessageId,
                 session_id: this.sessionId,
+                trace_id: this.traceId,
+                source_agent_type: waitForReply ? this.currentAgentType : '',
+                stream_name: QueueNames.ctrl_stream(params.targetAgentType),
                 worker_id: '',
                 target_agent_type: params.targetAgentType,
                 status: 'QUEUED',
@@ -376,25 +379,28 @@ export class AgentContext {
                 Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
             );
 
-            await this.redis.xadd(
-                QueueNames.ctrl_stream(task.targetAgentType),
-                '*',
-                'data',
-                JSON.stringify(command.toDict())
-            );
-
             // Initialize execution record for each dispatched task
             await dispatchRegistry.initializeExecution({
                 execution_id: `exec-${uuidv4().slice(0, 8)}`,
                 message_id: currentMessageId,
                 parent_message_id: currentParentMessageId,
                 session_id: this.sessionId,
+                trace_id: this.traceId,
+                source_agent_type: wait ? this.currentAgentType : '',
+                stream_name: QueueNames.ctrl_stream(task.targetAgentType),
                 worker_id: '',
                 target_agent_type: task.targetAgentType,
                 status: 'QUEUED',
                 cancel_requested: false,
                 cancel_reason: '',
             });
+
+            await this.redis.xadd(
+                QueueNames.ctrl_stream(task.targetAgentType),
+                '*',
+                'data',
+                JSON.stringify(command.toDict())
+            );
 
             dispatchedTasks.push({
                 message_id: currentMessageId,

@@ -189,19 +189,24 @@ export class WorkerRunner {
     async release(): Promise<void> {
         this.controlLoopRunning = false;
         await this.worker.stopHeartbeat();
-        await this.worker.registry.markWorkerInactive(this.worker.workerId);
-        await this.worker.registry.unregisterWorkerMembership(this.worker.workerId);
+        let releasedWorkerId = false;
+        if (this.lockToken) {
+            releasedWorkerId = await this.worker.registry.releaseWorkerId(this.worker.workerId, this.lockToken).catch(err => {
+                console.warn(`[${this.worker.workerId}] Failed to release lock:`, err.message);
+                return false;
+            });
+            this.lockToken = null;
+        } else {
+            releasedWorkerId = await this.worker.registry.markWorkerInactive(this.worker.workerId);
+        }
+        if (releasedWorkerId) {
+            await this.worker.registry.unregisterWorkerMembership(this.worker.workerId);
+        }
         if ((this.worker as any).pluginRegistry?.onWorkerShutdown) {
             if (this.worker.pluginRegistry.logHookStatsOnShutdown) {
                 this.worker.pluginRegistry.logHookStats();
             }
             await this.worker.pluginRegistry.onWorkerShutdown(this.worker);
-        }
-        if (this.lockToken) {
-            await this.worker.registry.releaseWorkerId(this.worker.workerId, this.lockToken).catch(err => {
-                console.warn(`[${this.worker.workerId}] Failed to release lock:`, err.message);
-            });
-            this.lockToken = null;
         }
         if (this.controlTask) {
             await this.controlTask.catch(() => undefined);
@@ -213,17 +218,6 @@ export class WorkerRunner {
     }
 
     async poll(options: { count?: number; block?: number } = {}): Promise<{ streamName: string; msgId: string; data: GatewayCommand }[]> {
-        // 在轮询前检查并刷新锁（类似于 Python SDK 的逻辑）
-        try {
-            const ok = await this.worker.registry.refreshWorkerIdLock(this.worker.workerId);
-            if (!ok) {
-                throw new Error(`Worker lock lost for ${this.worker.workerId}`);
-            }
-        } catch (err: any) {
-            console.error(`[${this.worker.workerId}] Lock maintenance error:`, err.message);
-            throw err;
-        }
-
         const streams: string[] = [];
         const ids: string[] = [];
         for (const cap of this.worker.getAgentTypes()) {

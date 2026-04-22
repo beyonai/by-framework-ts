@@ -47,8 +47,8 @@ export class RegistryKeys {
   /** Default TTL (7 days) for session-related aggregation keys */
   static DEFAULT_SESSION_TTL = 7 * 24 * 3600;
 
-  /** Active workers sorted set (sorted by heartbeat timestamp) */
-  static ACTIVE_WORKERS = 'byai_gateway:registry:active_workers';
+  /** Known workers set used for registry enumeration */
+  static KNOWN_WORKERS = 'byai_gateway:registry:workers';
 
   /** Default health check threshold (30 seconds) in milliseconds */
   static SD_DEFAULT_HEALTH_THRESHOLD_MS = 30000;
@@ -73,11 +73,11 @@ export class RegistryKeys {
   /** Worker default heartbeat interval (seconds) */
   static WORKER_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5;
 
-  /** Worker online lease TTL (seconds) - existence means worker is online */
+  /** Worker online lease TTL (seconds) */
   static WORKER_DEFAULT_LEASE_TTL_SECONDS = 15;
 
   /**
-   * Worker online lease key - existence indicates worker is online.
+   * Worker online lease key. Value stores presence token and last_seen.
    */
   static worker_online_lease(workerId: string): string {
     return `byai_gateway:registry:worker:online:${workerId}`;

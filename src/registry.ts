@@ -3,6 +3,52 @@ import { Redis } from 'ioredis';
 import { getRedis } from './redis_client';
 import { RegistryKeys } from './constants';
 
+interface WorkerPresence {
+    readonly version: number;
+    readonly token: string | null;
+    readonly last_seen: number;
+}
+
+interface DecodedPresence {
+    readonly token: string | null;
+    readonly lastSeen: number;
+    readonly isLegacy: boolean;
+}
+
+function encodeWorkerPresence(token: string | null, lastSeen: number): string {
+    return JSON.stringify({
+        version: 1,
+        token,
+        last_seen: lastSeen,
+    } satisfies WorkerPresence);
+}
+
+function decodeWorkerPresence(raw: string | null): DecodedPresence {
+    if (raw === null) {
+        return { token: null, lastSeen: 0, isLegacy: false };
+    }
+
+    try {
+        const payload = JSON.parse(raw) as unknown;
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            const record = payload as Record<string, unknown>;
+            const token = record.token === null || record.token === undefined
+                ? null
+                : String(record.token);
+            const lastSeen = typeof record.last_seen === 'number'
+                ? record.last_seen
+                : Number(record.last_seen || 0);
+            return { token, lastSeen, isLegacy: false };
+        }
+        if (payload === 1) {
+            return { token: null, lastSeen: 0, isLegacy: true };
+        }
+        return { token: String(payload), lastSeen: 0, isLegacy: true };
+    } catch {
+        return { token: raw, lastSeen: 0, isLegacy: true };
+    }
+}
+
 export class WorkerRegistry {
     private redis: Redis;
     private readonly REGISTRY_KEY = 'gateway:worker_registry';
@@ -22,6 +68,7 @@ export class WorkerRegistry {
      * Use this when you want to register separately from heartbeat.
      */
     async registerWorkerMembership(workerId: string, agentTypes: string[]): Promise<void> {
+        await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
         for (const agentType of agentTypes) {
             await this.redis.sadd(RegistryKeys.workerDeclaredAgentTypes(workerId), agentType);
             await this.redis.sadd(RegistryKeys.agentTypeMembers(agentType), workerId);
@@ -30,17 +77,37 @@ export class WorkerRegistry {
 
     /**
      * Send heartbeat for a worker to maintain online status.
-     * Updates both the sorted set timestamp and the lease key.
+     * Updates the token-owned presence lease.
      */
-    async heartbeatWorker(workerId: string, leaseTtlSeconds: number = RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS): Promise<void> {
+    async heartbeatWorker(workerId: string, leaseTtlSeconds: number = RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS): Promise<boolean> {
         const now = Date.now();
-        await this.redis.zadd(RegistryKeys.ACTIVE_WORKERS, now.toString(), workerId);
-        await this.redis.set(
-            RegistryKeys.worker_online_lease(workerId),
-            '1',
-            'EX',
-            leaseTtlSeconds
-        );
+        const key = RegistryKeys.worker_online_lease(workerId);
+        const token = this.lockTokens.get(workerId) || null;
+        const current = await this.redis.get(key);
+        const currentPresence = decodeWorkerPresence(current);
+
+        if (token) {
+            if (current === null) {
+                const ok = await this.redis.set(
+                    key,
+                    encodeWorkerPresence(token, now),
+                    'EX',
+                    leaseTtlSeconds,
+                    'NX'
+                );
+                if (!ok) return false;
+            } else if (currentPresence.token !== token) {
+                return false;
+            } else {
+                await this.redis.set(key, encodeWorkerPresence(token, now), 'EX', leaseTtlSeconds);
+            }
+        } else {
+            if (currentPresence.token !== null) return false;
+            await this.redis.set(key, encodeWorkerPresence(null, now), 'EX', leaseTtlSeconds);
+        }
+
+        await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
+        return true;
     }
 
     async unregisterWorker(workerId: string): Promise<void> {
@@ -51,9 +118,15 @@ export class WorkerRegistry {
     /**
      * Mark worker as inactive (remove lease) without removing membership.
      */
-    async markWorkerInactive(workerId: string): Promise<void> {
-        await this.redis.del(RegistryKeys.worker_online_lease(workerId));
-        await this.redis.zrem(RegistryKeys.ACTIVE_WORKERS, workerId);
+    async markWorkerInactive(workerId: string, token?: string): Promise<boolean> {
+        const expected = token || this.lockTokens.get(workerId);
+        const key = RegistryKeys.worker_online_lease(workerId);
+        const current = await this.redis.get(key);
+        const currentPresence = decodeWorkerPresence(current);
+        if (expected && currentPresence.token !== expected) return false;
+
+        await this.redis.del(key);
+        return true;
     }
 
     /**
@@ -62,6 +135,7 @@ export class WorkerRegistry {
     async unregisterWorkerMembership(workerId: string): Promise<void> {
         const agentTypes = await this.redis.smembers(RegistryKeys.workerDeclaredAgentTypes(workerId));
         await this.redis.del(RegistryKeys.workerDeclaredAgentTypes(workerId));
+        await this.redis.srem(RegistryKeys.KNOWN_WORKERS, workerId);
         for (const agentType of agentTypes) {
             await this.redis.srem(RegistryKeys.agentTypeMembers(agentType), workerId);
         }
@@ -92,7 +166,9 @@ export class WorkerRegistry {
      */
     async isWorkerOnline(workerId: string): Promise<boolean> {
         const leaseValue = await this.redis.get(RegistryKeys.worker_online_lease(workerId));
-        return leaseValue !== null;
+        if (leaseValue === null) return false;
+        const presence = decodeWorkerPresence(leaseValue);
+        return presence.isLegacy || presence.lastSeen > 0;
     }
 
     /**
@@ -116,12 +192,7 @@ export class WorkerRegistry {
     }
 
     async getTargetWorker(agentType: string): Promise<string | null> {
-        const workers = await this.redis.smembers(RegistryKeys.agentTypeMembers(agentType));
-        if (!workers || workers.length === 0) {
-            return null;
-        }
-        const randomIndex = Math.floor(Math.random() * workers.length);
-        return workers[randomIndex];
+        return this.getRandomOnlineWorker(agentType);
     }
 
     /**
@@ -158,19 +229,22 @@ export class WorkerRegistry {
 
     // Maintaining these for compatibility with current TS tests, but they now use the new keys
     async getWorker(workerId: string): Promise<any | null> {
-        const score = await this.redis.zscore(RegistryKeys.ACTIVE_WORKERS, workerId);
-        if (score === null) return null;
+        const rawPresence = await this.redis.get(RegistryKeys.worker_online_lease(workerId));
+        if (rawPresence === null) return null;
+        const presence = decodeWorkerPresence(rawPresence);
+        if (!presence.isLegacy && presence.lastSeen <= 0) return null;
+
         const agentTypes = await this.redis.smembers(RegistryKeys.workerDeclaredAgentTypes(workerId));
         return {
             agentTypes,
-            last_seen: parseInt(score),
+            last_seen: presence.isLegacy ? Date.now() : presence.lastSeen,
         };
     }
 
     async getAllWorkers(): Promise<Record<string, any>> {
-        const workerIds = await this.redis.zrange(RegistryKeys.ACTIVE_WORKERS, 0, -1);
+        const workerIds = await this.redis.smembers(RegistryKeys.KNOWN_WORKERS);
         const result: Record<string, any> = {};
-        for (const id of workerIds) {
+        for (const id of [...workerIds].sort()) {
             const data = await this.getWorker(id);
             if (data) result[id] = data;
         }
@@ -179,13 +253,20 @@ export class WorkerRegistry {
 
     async claimWorkerId(workerId: string, ttlSeconds: number = 60): Promise<string> {
         const token = uuidv4().replace(/-/g, '');
-        const key = RegistryKeys.worker_lock(workerId);
+        const key = RegistryKeys.worker_online_lease(workerId);
 
-        const ok = await this.redis.set(key, token, 'EX', ttlSeconds, 'NX');
+        const ok = await this.redis.set(
+            key,
+            encodeWorkerPresence(token, 0),
+            'EX',
+            ttlSeconds,
+            'NX'
+        );
         if (!ok) {
             throw new Error(`worker_id already in use: ${workerId}`);
         }
         this.lockTokens.set(workerId, token);
+        await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
         return token;
     }
 
@@ -193,9 +274,9 @@ export class WorkerRegistry {
         const token = this.lockTokens.get(workerId);
         if (!token) return false;
 
-        const key = RegistryKeys.worker_lock(workerId);
+        const key = RegistryKeys.worker_online_lease(workerId);
         const current = await this.redis.get(key);
-        if (current !== token) return false;
+        if (decodeWorkerPresence(current).token !== token) return false;
 
         const res = await this.redis.expire(key, ttlSeconds);
         return res === 1;
@@ -205,9 +286,9 @@ export class WorkerRegistry {
         const expected = token || this.lockTokens.get(workerId);
         if (!expected) return false;
 
-        const key = RegistryKeys.worker_lock(workerId);
+        const key = RegistryKeys.worker_online_lease(workerId);
         const current = await this.redis.get(key);
-        if (current !== expected) return false;
+        if (decodeWorkerPresence(current).token !== expected) return false;
 
         await this.redis.del(key);
         this.lockTokens.delete(workerId);

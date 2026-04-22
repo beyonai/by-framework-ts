@@ -121,49 +121,48 @@ export class GatewayClient {
         );
     }
 
+    private async initializeQueuedExecution(execution: Record<string, unknown>): Promise<void> {
+        const registry = this.registry as WorkerRegistry & {
+            initializeExecution?: (execution: Record<string, unknown>) => Promise<void>;
+            saveExecution?: (execution: Record<string, unknown>) => Promise<void>;
+        };
+
+        if (typeof registry.initializeExecution === 'function') {
+            await registry.initializeExecution(execution);
+            return;
+        }
+        if (typeof registry.saveExecution === 'function') {
+            await registry.saveExecution(execution);
+        }
+    }
+
     async sendCommand(command: BaseCommand, streamName?: string): Promise<SendMessageResponse> {
         const resolvedStreamName = streamName || QueueNames.ctrl_stream(command.header.targetAgentType);
-        const targetWorkerId = command.header.targetAgentType
-            ? await this.registry.getTargetWorker(command.header.targetAgentType)
-            : '';
-
-        if (!streamName && command.header.targetAgentType && !targetWorkerId) {
-            return {
-                success: false,
-                status: ExecutionStatus.FAILED,
-                message_id: '',
-                trace_id: '',
-                target_worker_id: '',
-                timestamp: Date.now(),
-            };
-        }
-
-        await this.redis.xadd(resolvedStreamName, '*', 'data', JSON.stringify(command.toDict()));
 
         if (!streamName && command.header.targetAgentType) {
-            await this.registry.saveExecution({
+            await this.initializeQueuedExecution({
                 execution_id: `exec-${uuidv4().slice(0, 8)}`,
                 message_id: command.header.messageId,
                 session_id: command.header.sessionId,
-                worker_id: '',
+                trace_id: command.header.traceId,
+                parent_message_id: command.header.parentMessageId || '',
+                source_agent_type: command.header.sourceAgentType || 'client',
                 target_agent_type: command.header.targetAgentType,
                 stream_name: resolvedStreamName,
-                redis_message_id: '',
+                worker_id: '',
                 status: 'QUEUED',
                 cancel_requested: false,
                 cancel_reason: '',
-                created_at: Date.now(),
-                started_at: 0,
-                finished_at: 0,
-                updated_at: Date.now(),
-            });
+            }).catch(() => undefined);
         }
+
+        await this.redis.xadd(resolvedStreamName, '*', 'data', JSON.stringify(command.toDict()));
 
         return {
             success: true,
             message_id: command.header.messageId,
             trace_id: command.header.traceId,
-            target_worker_id: targetWorkerId || '',
+            target_worker_id: '',
             timestamp: Date.now(),
             status: ExecutionStatus.QUEUED,
         };
@@ -405,9 +404,30 @@ export class GatewayClient {
             mergedPayload
         );
 
-        // When requireOnline=true, don't pass streamName so sendCommand handles routing and calls saveExecution
-        // When requireOnline=false, pass streamName directly to skip the check
-        const streamName = requireOnline ? undefined : route.streamName;
-        return this.sendCommand(command, streamName);
+        await this.initializeQueuedExecution({
+            execution_id: `exec-${uuidv4().slice(0, 8)}`,
+            message_id: messageId,
+            session_id: requestParams.sessionId,
+            trace_id: traceId,
+            parent_message_id: requestParams.parentMessageId || '',
+            source_agent_type: params.sourceAgentType || 'client',
+            target_agent_type: requestParams.targetAgentType,
+            stream_name: route.streamName,
+            worker_id: '',
+            status: 'QUEUED',
+            cancel_requested: false,
+            cancel_reason: '',
+        }).catch(() => undefined);
+
+        await this.redis.xadd(route.streamName, '*', 'data', JSON.stringify(command.toDict()));
+
+        return {
+            success: true,
+            message_id: messageId,
+            trace_id: traceId,
+            target_worker_id: route.targetWorkerId,
+            timestamp: Date.now(),
+            status: ExecutionStatus.QUEUED,
+        };
     }
 }

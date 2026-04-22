@@ -47,6 +47,7 @@ jest.mock('../src/registry', () => {
             markExecutionCancelling: jest.fn().mockResolvedValue(undefined),
             markCancelRequested: jest.fn().mockResolvedValue(undefined),
             saveExecution: jest.fn().mockResolvedValue(undefined),
+            initializeExecution: jest.fn().mockResolvedValue(undefined),
         })),
     };
 });
@@ -73,9 +74,11 @@ describe('GatewayClient', () => {
 
             expect(response.success).toBe(true);
             expect(response.status).toBe('QUEUED');
-            expect(response.target_worker_id).toBe('worker-123');
+            expect(response.target_worker_id).toBe('');
+            expect((client as any).registry.getTargetWorker).not.toHaveBeenCalled();
 
             const callArgs = mockRedis.xadd.mock.calls[0];
+            expect(callArgs[0]).toBe('byai_gateway:ctrl:agent_type:demo-agent-ts');
             const serializedMsg = JSON.parse(callArgs[3]);
 
             expect(serializedMsg.action_type).toBe(ActionType.ASK_AGENT);
@@ -85,16 +88,42 @@ describe('GatewayClient', () => {
             expect(serializedMsg.header.user_name).toBe('');
             expect(serializedMsg.body.content).toBe('Hello from verification script!');
             expect(serializedMsg.body.wait_for_reply).toBe(false);
-            expect((client as any).registry.saveExecution).toHaveBeenCalledWith(
+            expect((client as any).registry.initializeExecution).toHaveBeenCalledWith(
                 expect.objectContaining({
                     message_id: response.message_id,
                     session_id: 'test-session-ts',
+                    trace_id: response.trace_id,
+                    source_agent_type: 'client',
                     target_agent_type: 'demo-agent-ts',
+                    stream_name: 'byai_gateway:ctrl:agent_type:demo-agent-ts',
                     status: 'QUEUED',
                     worker_id: '',
                     cancel_requested: false,
                 })
             );
+            expect((client as any).registry.initializeExecution.mock.invocationCallOrder[0]).toBeLessThan(
+                mockRedis.xadd.mock.invocationCallOrder[0]
+            );
+        });
+
+        it('should queue directly to worker stream when targetWorkerId is provided', async () => {
+            const response = await client.sendMessage({
+                targetAgentType: 'demo-agent-ts',
+                targetWorkerId: 'worker-123',
+                sessionId: 'test-session-ts',
+                content: 'direct worker message',
+            });
+
+            expect(response.success).toBe(true);
+            expect(response.status).toBe('QUEUED');
+            expect(response.target_worker_id).toBe('worker-123');
+            expect((client as any).registry.isWorkerOnline).toHaveBeenCalledWith('worker-123');
+            expect((client as any).registry.hasOnlineAgentType).not.toHaveBeenCalled();
+
+            const callArgs = mockRedis.xadd.mock.calls[0];
+            expect(callArgs[0]).toBe('byai_gateway:ctrl:worker:worker-123');
+            const serializedMsg = JSON.parse(callArgs[3]);
+            expect(serializedMsg.header.target_agent_type).toBe('demo-agent-ts');
         });
 
         it('should correctly serialize complex message list', async () => {
@@ -181,6 +210,9 @@ describe('GatewayClient', () => {
             const serializedMsg = JSON.parse(callArgs[3]);
             expect(serializedMsg.action_type).toBe('CUSTOM_CLIENT');
             expect(serializedMsg.body.data).toEqual({ mode: 'custom' });
+            expect((client as any).registry.initializeExecution.mock.invocationCallOrder[0]).toBeLessThan(
+                mockRedis.xadd.mock.invocationCallOrder[0]
+            );
         });
 
         it('should return NOT_FOUND when cancel target execution does not exist', async () => {

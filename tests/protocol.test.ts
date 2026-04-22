@@ -75,8 +75,8 @@ describe('Protocol layer', () => {
     });
 
     describe('Constants - RegistryKeys', () => {
-        test('ACTIVE_WORKERS is a known constant', () => {
-            expect(RegistryKeys.ACTIVE_WORKERS).toBeTruthy();
+        test('KNOWN_WORKERS is a known constant', () => {
+            expect(RegistryKeys.KNOWN_WORKERS).toBeTruthy();
         });
 
         test('worker_declared_agent_types includes workerId', () => {

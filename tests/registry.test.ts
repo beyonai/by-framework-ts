@@ -43,6 +43,10 @@ class MockRedis {
         return this.sets.get(key)?.delete(member) ? 1 : 0;
     }
 
+    hasZset(key: string): boolean {
+        return this.zsets.has(key);
+    }
+
     async del(key: string): Promise<number> {
         let deleted = 0;
         if (this.sets.delete(key)) deleted += 1;
@@ -143,6 +147,9 @@ describe('WorkerRegistry', () => {
 
         const token = await registry.claimWorkerId(workerId, 10);
         expect(token).toBeDefined();
+        const presence = JSON.parse(await redis.get(`byai_gateway:registry:worker:online:${workerId}`) as string);
+        expect(presence.token).toBe(token);
+        expect(presence.last_seen).toBe(0);
 
         await expect(registry.claimWorkerId(workerId, 10)).rejects.toThrow('already in use');
 
@@ -155,6 +162,19 @@ describe('WorkerRegistry', () => {
         const newToken = await registry.claimWorkerId(workerId, 10);
         expect(newToken).toBeDefined();
         expect(newToken).not.toBe(token);
+    });
+
+    test('heartbeat updates token-owned presence without active workers zset', async () => {
+        const workerId = 'presence-worker';
+        const token = await registry.claimWorkerId(workerId, 10);
+
+        const ok = await registry.heartbeatWorker(workerId, 15);
+        const presence = JSON.parse(await redis.get(`byai_gateway:registry:worker:online:${workerId}`) as string);
+
+        expect(ok).toBe(true);
+        expect(presence.token).toBe(token);
+        expect(presence.last_seen).toBeGreaterThan(0);
+        expect(redis.hasZset('byai_gateway:registry:active_workers')).toBe(false);
     });
 
     test('getTargetWorker returns random worker for agentType', async () => {
@@ -170,6 +190,15 @@ describe('WorkerRegistry', () => {
         expect(result).toBeNull();
     });
 
+    test('getTargetWorker filters offline workers', async () => {
+        await registry.registerWorkerMembership('offline-worker', ['agent-y']);
+        await registry.registerWorker('online-worker', ['agent-y']);
+
+        const result = await registry.getTargetWorker('agent-y');
+
+        expect(result).toBe('online-worker');
+    });
+
     test('unregisterWorker removes worker and agentTypes', async () => {
         await registry.registerWorker('w-1', ['agent-a', 'agent-b']);
 
@@ -179,14 +208,14 @@ describe('WorkerRegistry', () => {
         expect(worker).toBeNull();
     });
 
-    test('getAllWorkers returns registered workers', async () => {
+    test('getAllWorkers returns active workers only', async () => {
         await registry.registerWorker('w-1', ['cap-a']);
-        await registry.registerWorker('w-2', ['cap-b']);
+        await registry.registerWorkerMembership('w-2', ['cap-b']);
 
         const all = await registry.getAllWorkers();
-        expect(Object.keys(all)).toHaveLength(2);
+        expect(Object.keys(all)).toHaveLength(1);
         expect(all['w-1']).toBeDefined();
-        expect(all['w-2']).toBeDefined();
+        expect(all['w-2']).toBeUndefined();
     });
 
     // --- Execution lifecycle tests (对标 Python test_registry.py) ---
@@ -318,4 +347,3 @@ describe('WorkerRegistry', () => {
         expect(exec!.cancel_requested).toBe(true);
     });
 });
-
