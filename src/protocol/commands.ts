@@ -116,7 +116,7 @@ export class ResumeCommand extends BaseCommand {
             MessageHeader.fromDict(data.header as Record<string, unknown>),
             (body.content as string | ReadonlyArray<unknown>) || '',
             (body.status as string) || '',
-            body.reply_data,
+            body.reply_data ?? null,
             { ...(body.extra_payload as Record<string, unknown> || {}) }
         );
     }

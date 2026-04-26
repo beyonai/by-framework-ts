@@ -11,6 +11,7 @@ import { QueueNames, RegistryKeys, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTA
 import { WorkerRegistry } from './registry';
 import { WorkerHeartbeat } from './heartbeat';
 import { MessageHeader } from './protocol/message_header';
+import { JsonValue, ProcessCommandResult, WireContent, normalizeProcessResult } from './protocol/results';
 import { PluginRegistry } from './extensions/registry';
 import { HistoryProvider } from './history';
 import { WorkspaceManager } from './workspace';
@@ -72,7 +73,7 @@ export abstract class GatewayWorker {
 
     abstract getAgentTypes(): ReadonlyArray<string>;
 
-    abstract processCommand(command: GatewayCommand, context: AgentContext): Promise<unknown>;
+    abstract processCommand(command: GatewayCommand, context: AgentContext): Promise<ProcessCommandResult>;
 
     async onCancelTask(_command: unknown): Promise<void> {
         console.log(`[${this.workerId}] Received cancel request`);
@@ -179,6 +180,8 @@ export abstract class GatewayWorker {
                             status: (command as ResumeCommand).status,
                             reply_data: (command as ResumeCommand).replyData,
                             content: (command as ResumeCommand).content,
+                            metadata: command.header.metadata,
+                            extra_payload: (command as ResumeCommand).extraPayload,
                         };
                         await this.redis.hset(resultsKey, command.header.messageId, JSON.stringify(resultData));
                         await this.redis.expire(resultsKey, TASK_GROUP_TTL_SECONDS);
@@ -195,18 +198,18 @@ export abstract class GatewayWorker {
             }
 
             const result = await this.processCommand(command, context);
+            const taskResult = normalizeProcessResult(result);
 
             // Determine final status from result
-            let finalStatus = AgentState.COMPLETED;
-            if (typeof result === 'string' && Object.values(AgentState).includes(result as AgentState)) {
-                finalStatus = result as AgentState;
-            } else if (typeof result === 'object' && result !== null && 'status' in result) {
-                finalStatus = String((result as any).status) as AgentState;
-            }
+            const finalStatus = taskResult.status;
 
             if (hasSourceAgent) {
                 permissionTransferred = true;
-                await this.enqueueAgentReturn(command, AgentState.COMPLETED, result);
+                await this.enqueueAgentReturn(command, taskResult.status, taskResult.replyData, {
+                    content: taskResult.content,
+                    metadata: taskResult.metadata,
+                    extraPayload: taskResult.extraPayload,
+                });
             }
             await this.pluginRegistry.onTaskComplete(context, result);
 
@@ -267,9 +270,22 @@ export abstract class GatewayWorker {
         }
     }
 
-    private async enqueueAgentReturn(command: GatewayCommand, status: string, replyData: any): Promise<void> {
+    private async enqueueAgentReturn(
+        command: GatewayCommand,
+        status: string,
+        replyData: JsonValue,
+        options: {
+            readonly content?: WireContent;
+            readonly metadata?: Readonly<Record<string, JsonValue>>;
+            readonly extraPayload?: Readonly<Record<string, JsonValue>>;
+        } = {}
+    ): Promise<void> {
         const header = command.header;
         if (!header.sourceAgentType) return;
+        const mergedMetadata = {
+            ...header.metadata,
+            ...(options.metadata ?? {}),
+        };
 
         const callbackMsg = new ResumeCommand(
             new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId, {
@@ -279,10 +295,12 @@ export abstract class GatewayWorker {
                 taskGroupId: header.taskGroupId,
                 userCode: header.userCode,
                 userName: header.userName,
+                metadata: mergedMetadata,
             }),
-            '',
+            options.content ?? '',
             status,
-            replyData
+            replyData,
+            options.extraPayload ?? {}
         );
 
         await this.redis.xadd(
@@ -337,12 +355,12 @@ export abstract class GatewayWorker {
  */
 export class AnonymousWorker extends GatewayWorker {
     private readonly agentTypes: ReadonlyArray<string>;
-    private readonly onTask: (command: GatewayCommand, context: AgentContext) => Promise<unknown>;
+    private readonly onTask: (command: GatewayCommand, context: AgentContext) => Promise<ProcessCommandResult>;
 
     constructor(options: {
         readonly workerId: string;
         readonly agentTypes: ReadonlyArray<string>;
-        readonly onTask: (command: GatewayCommand, context: AgentContext) => Promise<unknown>;
+        readonly onTask: (command: GatewayCommand, context: AgentContext) => Promise<ProcessCommandResult>;
         readonly registry?: WorkerRegistry;
         readonly redisClient?: Redis;
         readonly pluginRegistry?: PluginRegistry;
@@ -360,7 +378,7 @@ export class AnonymousWorker extends GatewayWorker {
         return this.agentTypes;
     }
 
-    async processCommand(command: GatewayCommand, context: AgentContext): Promise<unknown> {
+    async processCommand(command: GatewayCommand, context: AgentContext): Promise<ProcessCommandResult> {
         return this.onTask(command, context);
     }
 }

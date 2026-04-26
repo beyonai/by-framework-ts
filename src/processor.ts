@@ -6,8 +6,9 @@ import { AgentContext } from './context';
 import { QueueNames } from './constants';
 import { getRedis } from './redis_client';
 import { MessageHeader } from './protocol/message_header';
+import { JsonValue, ProcessCommandResult, WireContent, normalizeProcessResult } from './protocol/results';
 
-export type ContextHandler = (command: GatewayCommand, context: AgentContext) => Promise<any>;
+export type ContextHandler = (command: GatewayCommand, context: AgentContext) => Promise<ProcessCommandResult>;
 
 export class GatewayProcessor {
     private workerId: string;
@@ -40,9 +41,14 @@ export class GatewayProcessor {
             }
 
             const result = await handler(command, context);
+            const taskResult = normalizeProcessResult(result);
 
             if (hasSourceAgent) {
-                await this.enqueueCallback(command, 'SUCCESS', result);
+                await this.enqueueCallback(command, taskResult.status, taskResult.replyData, {
+                    content: taskResult.content,
+                    metadata: taskResult.metadata,
+                    extraPayload: taskResult.extraPayload,
+                });
                 await context.emitState({ state: `${AgentState.QUEUED}: ${sourceAgentType}` });
             } else {
                 await context.emitState({ state: AgentState.COMPLETED });
@@ -59,17 +65,32 @@ export class GatewayProcessor {
         }
     }
 
-    private async enqueueCallback(originalCommand: GatewayCommand, status: string, replyData: any): Promise<void> {
+    private async enqueueCallback(
+        originalCommand: GatewayCommand,
+        status: string,
+        replyData: JsonValue,
+        options: {
+            readonly content?: WireContent;
+            readonly metadata?: Readonly<Record<string, JsonValue>>;
+            readonly extraPayload?: Readonly<Record<string, JsonValue>>;
+        } = {}
+    ): Promise<void> {
         const header = originalCommand.header;
+        const mergedMetadata = {
+            ...header.metadata,
+            ...(options.metadata ?? {}),
+        };
         const callbackMsg = new ResumeCommand(
             new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId || uuidv4().replace(/-/g, ''), {
                 sourceAgentType: header.targetAgentType || this.workerId,
                 targetAgentType: header.sourceAgentType || '',
                 parentMessageId: header.messageId,
+                metadata: mergedMetadata,
             }),
-            '',
+            options.content ?? '',
             status,
-            replyData
+            replyData,
+            options.extraPayload ?? {}
         );
 
         await this.redis.xadd(

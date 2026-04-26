@@ -4,6 +4,7 @@ import { MessageHeader } from '../src/protocol/message_header';
 import { AgentState } from '../src/protocol/agent_state';
 import { AgentContext, TaskCancelledError } from '../src/context';
 import { ActionType } from '../src/protocol/action_type';
+import { AgentTaskResult } from '../src/protocol/results';
 import { WorkerRegistry } from '../src/registry';
 import { PluginRegistry } from '../src/extensions/registry';
 
@@ -165,6 +166,42 @@ describe('GatewayWorker', () => {
         expect(callbackData.body.reply_data).toBe('result data');
         expect(callbackData.header.target_agent_type).toBe('caller-agent');
         expect(callbackData.header.parent_message_id).toBe('msg-5');
+    });
+
+    test('handleMessage maps AgentTaskResult to callback and merges metadata', async () => {
+        const redis = new MockRedis();
+        const worker = createWorker(async () => new AgentTaskResult({
+            status: AgentState.COMPLETED,
+            content: 'structured content',
+            replyData: { answer: 42 },
+            metadata: { tokens: 123, caller: 'overridden' },
+            extraPayload: { debug_id: 'dbg-1' },
+        }), redis);
+
+        const command = new AskAgentCommand(
+            new MessageHeader('msg-structured', 'sess-structured', 'trace-structured', {
+                sourceAgentType: 'caller-agent',
+                targetAgentType: 'test-agent',
+                metadata: { caller: 'original', request_id: 'req-1' },
+            }),
+            'callback test'
+        );
+
+        await worker.handleMessage(command);
+
+        const callbackCalls = redis.calls.filter((c) => c.name.includes('caller-agent'));
+        expect(callbackCalls.length).toBe(1);
+
+        const callbackData = JSON.parse(callbackCalls[0].payload);
+        expect(callbackData.body.status).toBe(AgentState.COMPLETED);
+        expect(callbackData.body.content).toBe('structured content');
+        expect(callbackData.body.reply_data).toEqual({ answer: 42 });
+        expect(callbackData.body.extra_payload).toEqual({ debug_id: 'dbg-1' });
+        expect(callbackData.header.metadata).toEqual({
+            caller: 'overridden',
+            request_id: 'req-1',
+            tokens: 123,
+        });
     });
 
     test('handleMessage processes ResumeCommand and emits RESUMED state', async () => {

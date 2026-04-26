@@ -5,6 +5,7 @@ export * from './protocol/events';
 export * from './protocol/message_header';
 export * from './protocol/commands';
 export * from './protocol/responses';
+export * from './protocol/results';
 export * from './protocol/data_message';
 export * from './protocol/message';
 export * from './protocol/content_type';

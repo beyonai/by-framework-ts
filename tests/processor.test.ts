@@ -3,6 +3,7 @@ import { AskAgentCommand, ResumeCommand, commandFromDict } from '../src/protocol
 import { MessageHeader } from '../src/protocol/message_header';
 import { ActionType } from '../src/protocol/action_type';
 import { AgentState } from '../src/protocol/agent_state';
+import { AgentTaskResult } from '../src/protocol/results';
 
 class MockRedis {
     calls: Array<{ name: string; payload: string }> = [];
@@ -47,7 +48,13 @@ describe('GatewayProcessor', () => {
         );
 
         await processor.process(command, async (_cmd, _ctx) => {
-            return 'task result';
+            return new AgentTaskResult({
+                status: AgentState.COMPLETED,
+                content: 'done',
+                replyData: 'task result',
+                metadata: { tokens: 123 },
+                extraPayload: { debug_id: 'abc' },
+            });
         });
 
         // Should have emitted: state events + callback to source agent
@@ -56,8 +63,11 @@ describe('GatewayProcessor', () => {
 
         const callbackData = JSON.parse(callbackCalls[0].payload);
         expect(callbackData.action_type).toBe(ActionType.RESUME);
-        expect(callbackData.body.status).toBe('SUCCESS');
+        expect(callbackData.body.status).toBe(AgentState.COMPLETED);
+        expect(callbackData.body.content).toBe('done');
         expect(callbackData.body.reply_data).toBe('task result');
+        expect(callbackData.body.extra_payload).toEqual({ debug_id: 'abc' });
+        expect(callbackData.header.metadata).toEqual({ tokens: 123 });
         expect(callbackData.header.target_agent_type).toBe('agent-a');
         expect(callbackData.header.source_agent_id).toBe('agent-b');
         expect(callbackData.header.parent_message_id).toBe('msg-1');
