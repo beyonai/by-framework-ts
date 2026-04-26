@@ -26,22 +26,22 @@ async function main() {
     console.log("=== Pub/Sub 模式演示 ===");
 
     const registry = new WorkerRegistry(redis);
-    await registry.registerWorker(workerId, agentTypes);
-    console.log("[1] 注册成功");
-
-    // 1.1 启动心跳维持组件 (Standalone Heartbeat)
-    const heartbeat = new WorkerHeartbeat(workerId, agentTypes, redis);
-    await heartbeat.start();
 
     // 为 Runner 提供独立的 Redis 连接，避免轮询时的 BLOCK 指令阻塞其他操作（如 emitChunk）
     // 关键：轮询必须拥有自己的独占连接
-    const runner = new WorkerRunner({ workerId, agentTypes }, {
+    const runner = new WorkerRunner({ workerId, agentTypes, registry }, {
         redisClient: createRedis(redisOpts)
     });
     const emitter = new GatewayDataEmitter(redis);
 
-    // 2. 初始化消费组等环境
+    // 1. 初始化消费组等环境（内部会执行 claimWorkerId 获取独占锁）
     await runner.initialize();
+    console.log("[1] 注册成功并获取独占锁");
+
+    // 2. 启动心跳维持组件 (Standalone Heartbeat)
+    // 必须传入同一个 registry 实例，以便复用 runner 刚刚获取的 lock token
+    const heartbeat = new WorkerHeartbeat(workerId, agentTypes, redis, registry);
+    await heartbeat.start();
 
     // 用于追踪手动模式下的活跃任务，以便在收到取消指令时能够找到对应的信号源进行中断
     // 存储 AbortController 以及 session 相关上下文，方便在取消回调中发送状态
