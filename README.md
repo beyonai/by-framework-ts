@@ -119,6 +119,7 @@ process.on('SIGTERM', shutdown);
 - Pub/Sub 示例：[examples/pubsub_usage_demo.ts](examples/pubsub_usage_demo.ts)
 - 取消任务示例：[examples/cancel_task_demo.ts](examples/cancel_task_demo.ts)
 - 自定义 Command 示例：[examples/custom_command_demo.ts](examples/custom_command_demo.ts)
+- Dispatch SDK API 文档：[docs/dispatch-sdk-api.md](docs/dispatch-sdk-api.md)
 
 
 ## 核心 API

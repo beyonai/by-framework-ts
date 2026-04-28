@@ -1,6 +1,8 @@
 import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_TTL_SECONDS } from './constants';
+import { createRedisCallAgentDeps, callAgent as publishCallAgent } from './dispatch/dispatch_ask_agent';
+import type { CallAgentPublishInput } from './dispatch/types';
 import { EventType } from './protocol/event_type';
 import { AgentState } from './protocol/agent_state';
 import { AskAgentCommand } from './protocol/commands';
@@ -227,86 +229,51 @@ export class AgentContext {
         readonly content: string | Array<Record<string, unknown>>;
         readonly payload?: Readonly<Record<string, unknown>>;
         readonly waitForReply?: boolean;
+        readonly userCode?: string;
+        readonly userName?: string;
+        readonly taskGroupId?: string;
         readonly metadata?: Readonly<Record<string, unknown>>;
         readonly messageId?: string;
         readonly parentMessageId?: string;
         readonly probeAgentType?: boolean;
     }): Promise<CallAgentResult> {
-        const probeAgentType = params.probeAgentType ?? true;
+        const { WorkerRegistry } = await import('./registry');
+        const registry = new WorkerRegistry(this.redis);
+        const deps = createRedisCallAgentDeps({ redis: this.redis, registry, queueNames: QueueNames });
 
-        // Probe agent type if enabled
-        if (probeAgentType) {
-            const { WorkerRegistry } = await import('./registry');
-            const registry = new WorkerRegistry(this.redis);
-            const [hasCap] = await registry.hasAgentType(params.targetAgentType, true);
-            if (!hasCap) {
-                return {
-                    status: AgentState.FAILED,
-                    messageId: '',
-                    parentMessageId: params.parentMessageId || this.currentMessageId,
-                    targetAgentType: params.targetAgentType,
-                    error: `No alive worker found with agent type '${params.targetAgentType}'`,
-                    error_code: 'AGENT_TYPE_NOT_FOUND',
-                };
-            }
-        }
+        const input: CallAgentPublishInput = {
+            sessionId: this.sessionId,
+            traceId: this.traceId,
+            sourceAgentType: this.currentAgentType,
+            defaultParentMessageId: this.currentMessageId,
+            targetAgentType: params.targetAgentType,
+            content: params.content,
+            payload: params.payload,
+            waitForReply: params.waitForReply,
+            userCode: params.userCode,
+            userName: params.userName,
+            taskGroupId: params.taskGroupId,
+            metadata: params.metadata,
+            messageId: params.messageId,
+            parentMessageId: params.parentMessageId,
+            probeAgentType: params.probeAgentType,
+        };
 
-        const messageId = params.messageId || this.generateMessageId();
-        const parentMessageId = params.parentMessageId || this.currentMessageId;
-        const waitForReply = params.waitForReply ?? true;
+        const result = await publishCallAgent(deps, input);
 
-        const mergedPayload: Record<string, unknown> = { ...(params.payload || {}) };
-        if (waitForReply) {
-            mergedPayload.wait_for_reply = true;
+        if (result.runtimeHint === 'suspend') {
             this._isSuspended = true;
-        } else {
+        } else if (result.runtimeHint === 'transfer') {
             this._permissionTransferred = true;
         }
 
-        const command = new AskAgentCommand(
-            new MessageHeader(messageId, this.sessionId, this.traceId, {
-                sourceAgentType: waitForReply ? this.currentAgentType : '',
-                targetAgentType: params.targetAgentType,
-                parentMessageId: parentMessageId,
-                metadata: params.metadata,
-            }),
-            params.content as string | unknown[],
-            waitForReply,
-            Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
-        );
-
-        // Initialize execution record before dispatching
-        {
-            const { WorkerRegistry } = await import('./registry');
-            const registry = new WorkerRegistry(this.redis);
-            await registry.initializeExecution({
-                execution_id: `exec-${uuidv4().slice(0, 8)}`,
-                message_id: messageId,
-                parent_message_id: parentMessageId,
-                session_id: this.sessionId,
-                trace_id: this.traceId,
-                source_agent_type: waitForReply ? this.currentAgentType : '',
-                stream_name: QueueNames.ctrl_stream(params.targetAgentType),
-                worker_id: '',
-                target_agent_type: params.targetAgentType,
-                status: 'QUEUED',
-                cancel_requested: false,
-                cancel_reason: '',
-            });
-        }
-
-        await this.redis.xadd(
-            QueueNames.ctrl_stream(params.targetAgentType),
-            '*',
-            'data',
-            JSON.stringify(command.toDict())
-        );
-
         return {
-            status: AgentState.QUEUED,
-            messageId,
-            parentMessageId,
-            targetAgentType: params.targetAgentType,
+            status: result.status,
+            messageId: result.messageId,
+            parentMessageId: result.parentMessageId,
+            targetAgentType: result.targetAgentType,
+            error: result.error,
+            error_code: result.error_code,
         };
     }
 

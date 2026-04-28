@@ -19,6 +19,7 @@ export * from './runner';
 export * from './heartbeat';
 export * from './processor';
 export * from './constants';
+export * from './dispatch';
 export * from './factory';
 export * from './emitter';
 export * from './history';

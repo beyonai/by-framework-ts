@@ -7,6 +7,8 @@ import { ActionType } from './protocol/action_type';
 import { AskAgentCommand, BaseCommand, CancelTaskCommand, ResumeCommand } from './protocol/commands';
 import { MessageHeader } from './protocol/message_header';
 import { QueueNames } from './constants';
+import { initializeQueuedExecution } from './dispatch/execution_init';
+import { publishAskAgentCommand } from './dispatch/publish_ask_agent';
 import { BaiYingMessage } from './protocol/message';
 import { GatewayInterceptor } from './interceptors';
 
@@ -121,42 +123,38 @@ export class GatewayClient {
         );
     }
 
-    private async initializeQueuedExecution(execution: Record<string, unknown>): Promise<void> {
-        const registry = this.registry as WorkerRegistry & {
-            initializeExecution?: (execution: Record<string, unknown>) => Promise<void>;
-            saveExecution?: (execution: Record<string, unknown>) => Promise<void>;
-        };
-
-        if (typeof registry.initializeExecution === 'function') {
-            await registry.initializeExecution(execution);
-            return;
-        }
-        if (typeof registry.saveExecution === 'function') {
-            await registry.saveExecution(execution);
-        }
-    }
-
     async sendCommand(command: BaseCommand, streamName?: string): Promise<SendMessageResponse> {
         const resolvedStreamName = streamName || QueueNames.ctrl_stream(command.header.targetAgentType);
 
         if (!streamName && command.header.targetAgentType) {
-            await this.initializeQueuedExecution({
-                execution_id: `exec-${uuidv4().slice(0, 8)}`,
-                message_id: command.header.messageId,
-                session_id: command.header.sessionId,
-                trace_id: command.header.traceId,
-                parent_message_id: command.header.parentMessageId || '',
-                source_agent_type: command.header.sourceAgentType || 'client',
-                target_agent_type: command.header.targetAgentType,
-                stream_name: resolvedStreamName,
-                worker_id: '',
-                status: 'QUEUED',
-                cancel_requested: false,
-                cancel_reason: '',
-            }).catch(() => undefined);
+            if (command instanceof AskAgentCommand) {
+                await publishAskAgentCommand({
+                    redis: this.redis,
+                    registry: this.registry,
+                    command,
+                    streamName: resolvedStreamName,
+                    executionSourceAgentFallback: 'client',
+                });
+            } else {
+                await initializeQueuedExecution(this.registry, {
+                    execution_id: `exec-${uuidv4().slice(0, 8)}`,
+                    message_id: command.header.messageId,
+                    session_id: command.header.sessionId,
+                    trace_id: command.header.traceId,
+                    parent_message_id: command.header.parentMessageId || '',
+                    source_agent_type: command.header.sourceAgentType || 'client',
+                    target_agent_type: command.header.targetAgentType,
+                    stream_name: resolvedStreamName,
+                    worker_id: '',
+                    status: 'QUEUED',
+                    cancel_requested: false,
+                    cancel_reason: '',
+                }).catch(() => undefined);
+                await this.redis.xadd(resolvedStreamName, '*', 'data', JSON.stringify(command.toDict()));
+            }
+        } else {
+            await this.redis.xadd(resolvedStreamName, '*', 'data', JSON.stringify(command.toDict()));
         }
-
-        await this.redis.xadd(resolvedStreamName, '*', 'data', JSON.stringify(command.toDict()));
 
         return {
             success: true,
@@ -404,22 +402,31 @@ export class GatewayClient {
             mergedPayload
         );
 
-        await this.initializeQueuedExecution({
-            execution_id: `exec-${uuidv4().slice(0, 8)}`,
-            message_id: messageId,
-            session_id: requestParams.sessionId,
-            trace_id: traceId,
-            parent_message_id: requestParams.parentMessageId || '',
-            source_agent_type: params.sourceAgentType || 'client',
-            target_agent_type: requestParams.targetAgentType,
-            stream_name: route.streamName,
-            worker_id: '',
-            status: 'QUEUED',
-            cancel_requested: false,
-            cancel_reason: '',
-        }).catch(() => undefined);
-
-        await this.redis.xadd(route.streamName, '*', 'data', JSON.stringify(command.toDict()));
+        if (command instanceof AskAgentCommand) {
+            await publishAskAgentCommand({
+                redis: this.redis,
+                registry: this.registry,
+                command,
+                streamName: route.streamName,
+                executionSourceAgentFallback: 'client',
+            });
+        } else {
+            await initializeQueuedExecution(this.registry, {
+                execution_id: `exec-${uuidv4().slice(0, 8)}`,
+                message_id: messageId,
+                session_id: requestParams.sessionId,
+                trace_id: traceId,
+                parent_message_id: requestParams.parentMessageId || '',
+                source_agent_type: params.sourceAgentType || 'client',
+                target_agent_type: requestParams.targetAgentType,
+                stream_name: route.streamName,
+                worker_id: '',
+                status: 'QUEUED',
+                cancel_requested: false,
+                cancel_reason: '',
+            }).catch(() => undefined);
+            await this.redis.xadd(route.streamName, '*', 'data', JSON.stringify(command.toDict()));
+        }
 
         return {
             success: true,

@@ -207,24 +207,14 @@ export class WorkerRegistry {
         agentType: string,
         checkActive: boolean = true
     ): Promise<[boolean, string[]]> {
+        if (checkActive) {
+            return this.hasOnlineAgentType(agentType);
+        }
         const workers = await this.redis.smembers(RegistryKeys.agentTypeMembers(agentType));
         if (!workers || workers.length === 0) {
             return [false, []];
         }
-
-        let workerIds = [...workers];
-
-        if (checkActive) {
-            const onlineWorkerIds: string[] = [];
-            for (const workerId of workerIds) {
-                if (await this.isWorkerOnline(workerId)) {
-                    onlineWorkerIds.push(workerId);
-                }
-            }
-            workerIds = onlineWorkerIds;
-        }
-
-        return [workerIds.length > 0, workerIds];
+        return [workers.length > 0, [...workers]];
     }
 
     // Maintaining these for compatibility with current TS tests, but they now use the new keys
