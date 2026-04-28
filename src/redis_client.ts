@@ -13,7 +13,7 @@ type RedisOptions = {
 export function createRedis(options: RedisOptions = {}): Redis {
     const host = options.host || process.env.REDIS_HOST || 'localhost';
     const port = options.port || parseInt(process.env.REDIS_PORT || '6379', 10);
-    const db = options.db || parseInt(process.env.REDIS_DB || '0', 10);
+    const db = options.db || parseInt(process.env.REDIS_DATABASE || '0', 10);
     const username = options.username || process.env.REDIS_USERNAME;
     const password = options.password || process.env.REDIS_PASSWORD;
 
