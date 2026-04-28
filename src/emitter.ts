@@ -28,11 +28,16 @@ export interface EmitOptions {
 export class GatewayDataEmitter {
     private redis: Redis;
     private fixedDataStreamName?: string;
+    private sourceAgentType?: string;
 
-    constructor(redisClient?: Redis, dataStreamName?: string) {
+    constructor(redisClient?: Redis, params?: {
+        sourceAgentType?: string,
+        dataStreamName?: string,
+    }) {
         this.redis = redisClient || getRedis();
         // 如果提供了固定的 dataStreamName，则始终使用它（保持兼容性）
-        this.fixedDataStreamName = dataStreamName;
+        this.fixedDataStreamName = params?.dataStreamName;
+        this.sourceAgentType = params?.sourceAgentType;
     }
 
     private _buildSseLayout(
@@ -117,7 +122,7 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: options.eventType || EventType.ANSWER_DELTA,
-            sourceAgentType: options.sourceAgentType,
+            sourceAgentType: options.sourceAgentType || this.sourceAgentType,
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
@@ -145,7 +150,7 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: options.eventType || EventType.REASONING_LOG_DELTA,
-            sourceAgentType: options.sourceAgentType,
+            sourceAgentType: options.sourceAgentType || this.sourceAgentType,
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
