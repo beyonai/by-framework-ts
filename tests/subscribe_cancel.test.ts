@@ -2,6 +2,7 @@ import { WorkerRunner } from '../src/runner';
 import { CancelTaskCommand } from '../src/protocol/commands';
 import { MessageHeader } from '../src/protocol/message_header';
 import { QueueNames } from '../src/constants';
+import { AgentTaskResult } from '../src/protocol/results';
 
 class MockRedis {
     public xreadgroupCalls: any[] = [];
@@ -38,7 +39,7 @@ describe('WorkerRunner.subscribeCancel', () => {
         runner = new WorkerRunner({
             workerId: 'worker-test',
             getAgentTypes: () => ['test-cap'],
-            handleMessage: async () => 'SUCCESS'
+            handleMessage: async () => new AgentTaskResult({ status: 'SUCCESS' })
         }, {
             redisClient: mockRedis as any
         });

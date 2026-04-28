@@ -11,7 +11,7 @@ import { QueueNames, RegistryKeys, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTA
 import { WorkerRegistry } from './registry';
 import { WorkerHeartbeat } from './heartbeat';
 import { MessageHeader } from './protocol/message_header';
-import { JsonValue, ProcessCommandResult, WireContent, normalizeProcessResult } from './protocol/results';
+import { JsonValue, ProcessCommandResult, WireContent, normalizeProcessResult, AgentTaskResult } from './protocol/results';
 import { PluginRegistry } from './extensions/registry';
 import { HistoryProvider } from './history';
 import { WorkspaceManager } from './workspace';
@@ -102,7 +102,7 @@ export abstract class GatewayWorker {
     async handleMessage(
         command: GatewayCommand,
         options: HandleMessageOptions = {}
-    ): Promise<string> {
+    ): Promise<AgentTaskResult> {
         const traceId = command.header.traceId || uuidv4().replace(/-/g, '');
         const context = new AgentContext(
             command.header.sessionId,
@@ -189,7 +189,7 @@ export abstract class GatewayWorker {
                         const completed = await this.redis.hincrby(groupKey, TASK_GROUP_FIELD_COMPLETED, 1);
                         if (completed < parseInt(totalStr, 10)) {
                             console.log(`[${this.workerId}] TaskGroup ${command.header.taskGroupId} completed ${completed}/${totalStr}, waiting...`);
-                            return `${AgentState.QUEUED}: waiting_for_group`;
+                            return new AgentTaskResult({ status: `${AgentState.QUEUED}: waiting_for_group` });
                         }
                         console.log(`[${this.workerId}] TaskGroup ${command.header.taskGroupId} ALL COMPLETED (${totalStr})!`);
                     }
@@ -237,7 +237,7 @@ export abstract class GatewayWorker {
                 await context.flushToHistory();
             }
 
-            return finalStatus;
+            return taskResult;
         } catch (error: unknown) {
             if (error instanceof TaskCancelledError || (error instanceof Error && error.name === 'TaskCancelledError')) {
                 // Check if parent execution also has cancel_requested — if so, skip callback
@@ -258,7 +258,7 @@ export abstract class GatewayWorker {
                 } else {
                     await context.flushToHistory();
                 }
-                return AgentState.CANCELLED;
+                return new AgentTaskResult({ status: AgentState.CANCELLED });
             }
             const err = error instanceof Error ? error : new Error(String(error));
             console.error(`[${this.workerId}] Task failed:`, err);
@@ -274,7 +274,7 @@ export abstract class GatewayWorker {
                 await context.flushToHistory();
             }
 
-            return AgentState.FAILED;
+            return new AgentTaskResult({ status: AgentState.FAILED });
         } finally {
             setActiveWorkspace(prevWorkspace);
             if (this.sandbox) {

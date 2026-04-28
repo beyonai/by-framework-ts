@@ -75,7 +75,7 @@ describe('GatewayWorker workspace/sandbox lifecycle', () => {
         setActiveWorkspace('/tmp/ws/previous');
         const result = await worker.handleMessage(makeCommand());
 
-        expect(result).toBe('COMPLETED');
+        expect(result.status).toBe('COMPLETED');
         expect(workspaceManager.setupWorkspace).toHaveBeenCalledWith('sess-1', 'msg-1');
         expect(sandbox.install).toHaveBeenCalledTimes(1);
         expect(sandbox.uninstall).toHaveBeenCalledTimes(1);
@@ -99,7 +99,7 @@ describe('GatewayWorker workspace/sandbox lifecycle', () => {
         setActiveWorkspace('/tmp/ws/previous-fail');
         const result = await worker.handleMessage(makeCommand());
 
-        expect(result).toBe('FAILED');
+        expect(result.status).toBe('FAILED');
         expect(workspaceManager.setupWorkspace).toHaveBeenCalledWith('sess-1', 'msg-1');
         expect(sandbox.install).toHaveBeenCalledTimes(1);
         expect(sandbox.uninstall).toHaveBeenCalledTimes(1);

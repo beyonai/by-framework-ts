@@ -358,10 +358,11 @@ export class WorkerRunner {
                 });
             }
 
-            const finalStatus = await this.worker.handleMessage(data, {
+            const taskResult = await this.worker.handleMessage(data, {
                 cancelSignal: abortController.signal,
                 cancelReason,
             });
+            const finalStatus = taskResult.status;
             if (registry?.markExecutionFinished) {
                 await registry.markExecutionFinished(executionId, data.header.sessionId, finalStatus);
             }

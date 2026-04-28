@@ -80,7 +80,7 @@ describe('GatewayWorker', () => {
         );
 
         const result = await worker.handleMessage(command);
-        expect(result).toBe(AgentState.COMPLETED);
+        expect(result.status).toBe(AgentState.COMPLETED);
     });
 
     test('handleMessage returns CANCELLED on TaskCancelledError', async () => {
@@ -96,7 +96,7 @@ describe('GatewayWorker', () => {
         );
 
         const result = await worker.handleMessage(command);
-        expect(result).toBe(AgentState.CANCELLED);
+        expect(result.status).toBe(AgentState.CANCELLED);
     });
 
     test('cancelled worker returns CANCELLED without emitting state events', async () => {
@@ -113,7 +113,7 @@ describe('GatewayWorker', () => {
         );
 
         const result = await worker.handleMessage(command);
-        expect(result).toBe(AgentState.CANCELLED);
+        expect(result.status).toBe(AgentState.CANCELLED);
 
         // After removing emitState calls, no CANCELLING/CANCELLED state events should be emitted
         const statePayloads = redis.calls
@@ -140,7 +140,7 @@ describe('GatewayWorker', () => {
         );
 
         const result = await worker.handleMessage(command);
-        expect(result).toBe(AgentState.FAILED);
+        expect(result.status).toBe(AgentState.FAILED);
     });
 
     test('handleMessage enqueues callback to source agent', async () => {
@@ -221,7 +221,7 @@ describe('GatewayWorker', () => {
         );
 
         const result = await worker.handleMessage(command);
-        expect(result).toBe(AgentState.COMPLETED);
+        expect(result.status).toBe(AgentState.COMPLETED);
 
         const payloads = redis.calls
             .filter((c) => c.name.includes('sess-6'))

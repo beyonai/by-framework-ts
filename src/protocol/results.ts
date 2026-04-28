@@ -42,6 +42,8 @@ const RESULT_FIELDS = new Set([
     'metadata',
     'extraPayload',
     'extra_payload',
+    'finalAnswer',
+    'final_answer',
 ]);
 
 export function ensureJsonSerializable(value: unknown, path = 'value'): JsonValue {
@@ -92,12 +94,14 @@ export function normalizeProcessResult(result: unknown): AgentTaskResult {
             'replyData' in result
             || 'reply_data' in result
             || 'content' in result
+            || 'finalAnswer' in result
+            || 'final_answer' in result
             || (keys.length > 0 && keys.every((key) => RESULT_FIELDS.has(key)))
         );
         if (isStructured) {
             return new AgentTaskResult({
                 status: typeof result.status === 'string' ? result.status : AgentState.COMPLETED,
-                content: ensureWireContent(result.content ?? ''),
+                content: ensureWireContent(result.content ?? result.finalAnswer ?? result.final_answer ?? ''),
                 replyData: ensureJsonSerializable(result.replyData ?? result.reply_data ?? null, 'replyData'),
                 metadata,
                 extraPayload: ensureJsonObject(
