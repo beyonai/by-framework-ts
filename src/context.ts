@@ -67,6 +67,7 @@ export class AgentContext {
     private historySaved = false;
     private _isSuspended = false;
     private _permissionTransferred = false;
+    private _isStreamFinished = false;
 
     constructor(
         public readonly sessionId: string,
@@ -108,6 +109,14 @@ export class AgentContext {
 
     isPermissionTransferred(): boolean {
         return this._permissionTransferred;
+    }
+
+    isStreamFinished(): boolean {
+        return this._isStreamFinished;
+    }
+
+    setStreamFinished(finished: boolean): void {
+        this._isStreamFinished = finished;
     }
 
     async callTool(name: string, kwargs: Readonly<Record<string, unknown>> = {}): Promise<unknown> {
@@ -182,6 +191,7 @@ export class AgentContext {
             eventType: eventType as EventType
         });
         if (eventType === EventType.APP_STREAM_RESPONSE) {
+            this._isStreamFinished = true;
             await this.flushToHistory();
         }
     }

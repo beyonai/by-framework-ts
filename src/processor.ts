@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Redis } from 'ioredis';
 import { GatewayCommand, ResumeCommand } from './protocol/commands';
 import { AgentState } from './protocol/agent_state';
+import { EventType } from './protocol/event_type';
 import { AgentContext } from './context';
 import { QueueNames } from './constants';
 import { getRedis } from './redis_client';
@@ -52,6 +53,28 @@ export class GatewayProcessor {
                 await context.emitState({ state: `${AgentState.QUEUED}: ${sourceAgentType}` });
             } else {
                 await context.emitState({ state: AgentState.COMPLETED });
+            }
+
+            // Extract final message and emit FINAL_ANSWER
+            let finalMessage: string | null = null;
+            if (typeof taskResult.content === 'string' && taskResult.content) {
+                finalMessage = taskResult.content;
+            } else if (typeof taskResult.replyData === 'string' && taskResult.replyData) {
+                finalMessage = taskResult.replyData;
+            } else if (taskResult.replyData !== null && taskResult.replyData !== undefined) {
+                finalMessage = JSON.stringify(taskResult.replyData);
+            }
+
+            if (finalMessage !== null) {
+                await context.emitChunk(finalMessage, EventType.FINAL_ANSWER);
+            }
+
+            // Emit APP_STREAM_RESPONSE if conditions are met
+            const shouldEmitStreamEnd = !hasSourceAgent && !context.isSuspended();
+            if (shouldEmitStreamEnd) {
+                if (!context.isStreamFinished()) {
+                    await context.emitChunk('', EventType.APP_STREAM_RESPONSE);
+                }
             }
 
             return result;

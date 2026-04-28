@@ -5,6 +5,7 @@ export enum EventType {
     REASONING_LOG_START = "reasoningLogStart",
     REASONING_LOG_END = "reasoningLogEnd",
     APP_STREAM_RESPONSE = "appStreamResponse",
+    FINAL_ANSWER = "finalAnswer",
     TASK_CREATE = "taskCreate",
     STEP_COMPLETE = "stepComplete",
     TASK_STOP = "taskStop",

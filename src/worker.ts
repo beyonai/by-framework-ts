@@ -213,10 +213,26 @@ export abstract class GatewayWorker {
             }
             await this.pluginRegistry.onTaskComplete(context, result);
 
+            // Extract final message and emit FINAL_ANSWER
+            let finalMessage: string | null = null;
+            if (typeof taskResult.content === 'string' && taskResult.content) {
+                finalMessage = taskResult.content;
+            } else if (typeof taskResult.replyData === 'string' && taskResult.replyData) {
+                finalMessage = taskResult.replyData;
+            } else if (taskResult.replyData !== null && taskResult.replyData !== undefined) {
+                finalMessage = JSON.stringify(taskResult.replyData);
+            }
+
+            if (finalMessage !== null) {
+                await context.emitChunk(finalMessage, EventType.FINAL_ANSWER);
+            }
+
             // Emit APP_STREAM_RESPONSE if conditions are met
-            const shouldEmitStreamEnd = !hasSourceAgent && isTerminalState(finalStatus) && !permissionTransferred;
+            const shouldEmitStreamEnd = !hasSourceAgent && isTerminalState(finalStatus) && !permissionTransferred && !context.isSuspended();
             if (shouldEmitStreamEnd) {
-                await context.emitChunk('', EventType.APP_STREAM_RESPONSE);
+                if (!context.isStreamFinished()) {
+                    await context.emitChunk('', EventType.APP_STREAM_RESPONSE);
+                }
             } else {
                 await context.flushToHistory();
             }
