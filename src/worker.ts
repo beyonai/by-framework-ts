@@ -222,6 +222,7 @@ export abstract class GatewayWorker {
             } else if (taskResult.replyData !== null && taskResult.replyData !== undefined) {
                 finalMessage = JSON.stringify(taskResult.replyData);
             }
+            taskResult.finalAnswer = finalMessage || "";
 
             if (finalMessage !== null) {
                 await context.emitChunk(finalMessage, EventType.FINAL_ANSWER);

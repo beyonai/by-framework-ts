@@ -16,19 +16,22 @@ export class AgentTaskResult {
     public readonly replyData: JsonValue;
     public readonly metadata: Readonly<Record<string, JsonValue>>;
     public readonly extraPayload: Readonly<Record<string, JsonValue>>;
+    public finalAnswer: string;
 
     constructor(options: {
         readonly status?: string;
         readonly content?: WireContent;
-        readonly replyData?: JsonValue;
+        replyData?: JsonValue;
         readonly metadata?: Readonly<Record<string, JsonValue>>;
         readonly extraPayload?: Readonly<Record<string, JsonValue>>;
+        readonly finalAnswer?: string;
     } = {}) {
         this.status = options.status ?? AgentState.COMPLETED;
         this.content = options.content ?? '';
         this.replyData = options.replyData ?? null;
         this.metadata = options.metadata ?? {};
         this.extraPayload = options.extraPayload ?? {};
+        this.finalAnswer = options.finalAnswer ?? '';
     }
 }
 
