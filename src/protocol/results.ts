@@ -21,10 +21,10 @@ export class AgentTaskResult {
     constructor(options: {
         readonly status?: string;
         readonly content?: WireContent;
-        replyData?: JsonValue;
+        readonly replyData?: JsonValue;
         readonly metadata?: Readonly<Record<string, JsonValue>>;
         readonly extraPayload?: Readonly<Record<string, JsonValue>>;
-        readonly finalAnswer?: string;
+        finalAnswer?: string;
     } = {}) {
         this.status = options.status ?? AgentState.COMPLETED;
         this.content = options.content ?? '';
