@@ -38,6 +38,7 @@ export class WorkerRunner {
     private fetchCount: number;
     private activeExecutions = new Map<string, RunningExecution>();
     private messageToExecution = new Map<string, string>();
+    private cancelHandlers = new Set<(command: CancelTaskCommand) => Promise<void> | void>();
     private readonly terminalExecutionStates = new Set<string>([
         AgentState.COMPLETED,
         AgentState.FAILED,
@@ -116,6 +117,16 @@ export class WorkerRunner {
 
         if (typeof maybeClient.disconnect === 'function') {
             maybeClient.disconnect();
+        }
+    }
+
+    private notifyCancelHandlers(command: CancelTaskCommand): void {
+        for (const handler of this.cancelHandlers) {
+            Promise.resolve()
+                .then(() => handler(command))
+                .catch(handlerErr => {
+                    console.error(`[${this.worker.workerId}] Error in cancel subscription handler:`, handlerErr);
+                });
         }
     }
 
@@ -474,6 +485,7 @@ export class WorkerRunner {
                     Promise.resolve().then(() => this.worker.pluginRegistry.onTaskCancel(running.context, command));
                 }
             }
+            this.notifyCancelHandlers(command);
         } finally {
             await this.redis.xack(streamName, this.groupName, msgId);
         }
@@ -582,21 +594,16 @@ export class WorkerRunner {
         handler: (command: CancelTaskCommand) => Promise<void> | void,
         options: { pollInterval?: number } = {}
     ): { stop: () => void } {
+        this.cancelHandlers.add(handler);
         let subRunning = true;
+        let pollingLoopRunning = false;
 
         const loop = async () => {
             console.log(`[${this.worker.workerId}] Cancel subscription loop started.`);
+            pollingLoopRunning = true;
             while (subRunning && this.running === false) {
                 try {
-                    const commands = await this.runControlOnce(500); // 缩短阻塞时间
-                    for (const cmd of commands) {
-                        if (cmd instanceof CancelTaskCommand) {
-                            // 同样不等待处理，立即继续下一轮监听
-                            Promise.resolve().then(() => handler(cmd)).catch(handlerErr => {
-                                console.error(`[${this.worker.workerId}] Error in cancel subscription handler:`, handlerErr);
-                            });
-                        }
-                    }
+                    await this.runControlOnce(500); // 缩短阻塞时间
                 } catch (err) {
                     console.error(`[${this.worker.workerId}] Error in cancel subscription loop:`, err);
                     if (!subRunning) break;
@@ -604,12 +611,21 @@ export class WorkerRunner {
                 }
             }
             console.log(`[${this.worker.workerId}] Cancel subscription loop stopped.`);
+            pollingLoopRunning = false;
         };
 
-        loop();
+        if (!this.controlLoopRunning) {
+            loop();
+        }
 
         return {
-            stop: () => { subRunning = false; }
+            stop: () => {
+                subRunning = false;
+                this.cancelHandlers.delete(handler);
+                if (!pollingLoopRunning) {
+                    return;
+                }
+            }
         };
     }
 
