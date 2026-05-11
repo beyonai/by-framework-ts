@@ -19,6 +19,21 @@ export interface EmitOptions {
     metadata?: Record<string, any>;
     eventType?: EventType | string;
     contentType?: string;
+    objectType?: string;
+    status?: string;
+}
+
+interface SseLayoutParams {
+    content?: string | null;
+    role?: string | null;
+    contentType: string;
+    sourceAgentType: string;
+    functionCall?: Record<string, any> | null;
+    toolCalls?: Array<Record<string, any>> | null;
+    orderId?: string;
+    parentOrderId?: string;
+    objectType?: string;
+    status?: string;
 }
 
 /**
@@ -40,22 +55,27 @@ export class GatewayDataEmitter {
         this.sourceAgentType = params?.sourceAgentType;
     }
 
-    private _buildSseLayout(
-        content: string | null | undefined,
-        role: string | null,
-        contentType: string,
-        sourceAgentType: string,
-        functionCall?: Record<string, any> | null,
-        toolCalls?: Array<Record<string, any>> | null,
-        orderId?: string,
-        parentOrderId?: string
-    ): Record<string, any> {
+    private _buildSseLayout(params: SseLayoutParams): Record<string, any> {
+        const {
+            content,
+            role,
+            contentType,
+            sourceAgentType,
+            functionCall,
+            toolCalls,
+            orderId,
+            parentOrderId,
+            objectType,
+            status,
+        } = params;
         return {
             id: uuidv4().replace(/-/g, '').toUpperCase(),
             created: Math.floor(Date.now() / 1000),
             model: "",
             object: "",
+            objectType,
             contentType,
+            status,
             agentId: sourceAgentType || null,
             orderId: orderId || null,
             parentOrderId: parentOrderId || null,
@@ -126,14 +146,18 @@ export class GatewayDataEmitter {
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
-                chunkEvent.content,
-                chunkEvent.role ?? 'assistant',
-                options.contentType || SseMessageType.text,
-                options.sourceAgentType || '',
-                chunkEvent.function_call,
-                chunkEvent.tool_calls,
-                options.messageId,
-                options.parentMessageId
+                {
+                    content: chunkEvent.content,
+                    role: chunkEvent.role ?? 'assistant',
+                    contentType: options.contentType || SseMessageType.text,
+                    sourceAgentType: options.sourceAgentType || '',
+                    functionCall: chunkEvent.function_call,
+                    toolCalls: chunkEvent.tool_calls,
+                    orderId: options.messageId,
+                    parentOrderId: options.parentMessageId,
+                    objectType: options.objectType,
+                    status: options.status,
+                }
             ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
@@ -154,14 +178,16 @@ export class GatewayDataEmitter {
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
-                stateMsg,
-                null,
-                options.contentType || SseReasonMessageType.think_title,
-                options.sourceAgentType || '',
-                null,
-                null,
-                options.messageId,
-                options.parentMessageId
+                {
+                    content: stateMsg,
+                    role: null,
+                    contentType: options.contentType || SseReasonMessageType.think_title,
+                    sourceAgentType: options.sourceAgentType || '',
+                    functionCall: null,
+                    toolCalls: null,
+                    orderId: options.messageId,
+                    parentOrderId: options.parentMessageId,
+                }
             ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
@@ -183,14 +209,16 @@ export class GatewayDataEmitter {
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
-                JSON.stringify(filesPayload),
-                null,
-                SseReasonMessageType.task_create_file,
-                options.sourceAgentType || '',
-                null,
-                null,
-                options.messageId,
-                options.parentMessageId
+                {
+                    content: JSON.stringify(filesPayload),
+                    role: null,
+                    contentType: SseReasonMessageType.task_create_file,
+                    sourceAgentType: options.sourceAgentType || '',
+                    functionCall: null,
+                    toolCalls: null,
+                    orderId: options.messageId,
+                    parentOrderId: options.parentMessageId,
+                }
             ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
@@ -223,14 +251,16 @@ export class GatewayDataEmitter {
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
-                JSON.stringify(inputForm),
-                'assistant',
-                SseReasonMessageType.task_user_input,
-                options.sourceAgentType || '',
-                null,
-                null,
-                options.messageId,
-                options.parentMessageId
+                {
+                    content: JSON.stringify(inputForm),
+                    role: 'assistant',
+                    contentType: SseReasonMessageType.task_user_input,
+                    sourceAgentType: options.sourceAgentType || '',
+                    functionCall: null,
+                    toolCalls: null,
+                    orderId: options.messageId,
+                    parentOrderId: options.parentMessageId,
+                }
             ),
             metadata: (typeof event === 'string' ? {} : event.metadata) || options.metadata,
         });
