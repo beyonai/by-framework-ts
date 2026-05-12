@@ -113,7 +113,7 @@ export class GatewayDataEmitter {
             trace_id: params.traceId,
             session_id: params.sessionId,
             event_type: params.eventType,
-            source_agent_type: params.sourceAgentType || '',
+            source_agent_type: params.sourceAgentType || this.sourceAgentType || '',
             message_id: params.messageId || '',
             parent_message_id: params.parentMessageId || '',
             timestamp: Date.now(),
@@ -142,7 +142,7 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: options.eventType || EventType.ANSWER_DELTA,
-            sourceAgentType: options.sourceAgentType || this.sourceAgentType,
+            sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
@@ -174,7 +174,7 @@ export class GatewayDataEmitter {
             sessionId,
             traceId,
             eventType: options.eventType || EventType.REASONING_LOG_DELTA,
-            sourceAgentType: options.sourceAgentType || this.sourceAgentType,
+            sourceAgentType: options.sourceAgentType,
             messageId: options.messageId,
             parentMessageId: options.parentMessageId,
             data: this._buildSseLayout(
