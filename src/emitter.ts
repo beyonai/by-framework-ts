@@ -60,7 +60,6 @@ export class GatewayDataEmitter {
             content,
             role,
             contentType,
-            sourceAgentType,
             functionCall,
             toolCalls,
             orderId,
@@ -76,7 +75,6 @@ export class GatewayDataEmitter {
             objectType,
             contentType,
             status,
-            agentId: sourceAgentType || null,
             orderId: orderId || null,
             parentOrderId: parentOrderId || null,
             choices: [
