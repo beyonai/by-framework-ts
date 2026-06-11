@@ -24,6 +24,8 @@ export interface CallAgentPublishInput {
     readonly messageId?: string;
     readonly parentMessageId?: string;
     readonly probeAgentType?: boolean;
+    /** Langfuse parent observation ID to nest this sub-agent under the caller's task span. */
+    readonly langfuseParentObservationId?: string;
 }
 
 export interface CallAgentPublishResult {

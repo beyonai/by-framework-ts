@@ -137,7 +137,7 @@ describe('AgentContext data message format', () => {
         const payload = JSON.parse(redis.calls[0].payload);
         expect(payload.action_type).toBe(ActionType.ASK_AGENT);
         expect(payload.header.target_agent_type).toBe('demo-agent-ts');
-        expect(payload.header.source_agent_id).toBe('agent-c');
+        expect(payload.header.source_agent_type).toBe('agent-c');
         expect(payload.header.session_id).toBe('sess-3');
         expect(payload.header.parent_message_id).toBe('msg-3');
         expect(payload.body.content).toBe('delegate this');

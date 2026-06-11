@@ -8,6 +8,7 @@ import { AskAgentCommand, CancelTaskCommand, GatewayCommand, ResumeCommand, comm
 import { WorkerRegistry } from './registry';
 import { HistoryProvider } from './history';
 import { AgentState } from './protocol/agent_state';
+import { SpanRecorder, TraceSpan } from './trace/span_recorder';
 
 interface RunningExecution {
     executionId: string;
@@ -45,6 +46,8 @@ export class WorkerRunner {
         AgentState.CANCELLED,
     ]);
 
+    readonly spanRecorder: SpanRecorder;
+
     constructor(
         workerOrOptions: GatewayWorker | { workerId: string; agentTypes: string[]; registry?: WorkerRegistry },
         options: {
@@ -52,6 +55,7 @@ export class WorkerRunner {
             groupName?: string;
             maxConcurrency?: number;
             fetchCount?: number;
+            spanRecorder?: SpanRecorder;
         } = {}
     ) {
         if ('workerId' in workerOrOptions && !('handleMessage' in workerOrOptions)) {
@@ -80,6 +84,29 @@ export class WorkerRunner {
         this.consumerName = this.worker.workerId;
         this.maxConcurrency = options.maxConcurrency ?? 50;
         this.fetchCount = options.fetchCount ?? 10;
+        this.spanRecorder = options.spanRecorder || new SpanRecorder(this.redis);
+    }
+
+    /** Return the hex parent span ID propagated from the client dispatch. */
+    static _clientDispatchParentSpanId(header: any): string {
+        const fromField = String(header?.traceParentSpanId || '');
+        if (fromField) return fromField;
+        const meta = header?.metadata || {};
+        const fromMeta = String(meta['trace_parent_span_id'] || '');
+        if (fromMeta) return fromMeta;
+        return `${header?.messageId || ''}:client.dispatch`;
+    }
+
+    /** Return the raw framework span ID used to build the Redis trace tree. */
+    static _frameworkParentSpanId(header: any): string {
+        const meta = header?.metadata || {};
+        const fromMeta = String(meta['framework_parent_span_id'] || '');
+        if (fromMeta) return fromMeta;
+        const fromField = String(header?.traceParentSpanId || '');
+        if (fromField) return fromField;
+        const fromMetaTrace = String(meta['trace_parent_span_id'] || '');
+        if (fromMetaTrace) return fromMetaTrace;
+        return `${header?.messageId || ''}:client.dispatch`;
     }
 
     private createBlockingRedisConnection(): { client: Redis; owned: boolean } {
@@ -369,14 +396,45 @@ export class WorkerRunner {
                 });
             }
 
+            const frameworkParentSpanId = WorkerRunner._frameworkParentSpanId(data.header);
+            const executionStartedAt = Date.now();
+            const executionRef: { context: any } = { context: null };
+
             const taskResult = await this.worker.handleMessage(data, {
                 cancelSignal: abortController.signal,
                 cancelReason,
+                executionId,
+                spanRecorder: this.spanRecorder,
+                executionRef,
             });
+            const executionFinishedAt = Date.now();
             const finalStatus = taskResult.status;
+
+            // Extract telemetry from AgentContext filled by worker
+            const execContext = executionRef.context;
+            const chunkCount = Number(execContext?._chunkCount || 0);
+            const tokenUsage: Record<string, any> = { ...(execContext?._tokenUsage || {}) };
+
             if (registry?.markExecutionFinished) {
                 await registry.markExecutionFinished(executionId, data.header.sessionId, finalStatus);
             }
+
+            await this._recordWorkerExecuteSpan({
+                traceId: data.header.traceId,
+                executionId,
+                messageId: data.header.messageId,
+                parentMessageId: String(existingExecution?.parent_message_id || data.header.parentMessageId || ''),
+                sessionId: data.header.sessionId,
+                workerId: this.worker.workerId,
+                targetAgentType: data.header.targetAgentType,
+                status: finalStatus,
+                startTs: executionStartedAt,
+                endTs: executionFinishedAt,
+                parentSpanId: frameworkParentSpanId,
+                chunkCount,
+                tokens: tokenUsage,
+            });
+
             await this.redis.xack(streamName, this.groupName, msgId);
         } catch (err) {
             console.error(`Failed to process/ack message ${msgId}:`, err);
@@ -387,6 +445,49 @@ export class WorkerRunner {
                 this.messageToExecution.delete(data.header.messageId);
                 this.activeExecutions.delete(executionId);
             }
+        }
+    }
+
+    private async _recordWorkerExecuteSpan(params: {
+        traceId: string;
+        executionId: string;
+        messageId: string;
+        parentMessageId: string;
+        sessionId: string;
+        workerId: string;
+        targetAgentType: string;
+        status: string;
+        startTs: number;
+        endTs: number;
+        parentSpanId?: string;
+        chunkCount?: number;
+        tokens?: Record<string, any>;
+        errorType?: string;
+        errorMessage?: string;
+    }): Promise<void> {
+        try {
+            await this.spanRecorder.recordSpan({
+                traceId: params.traceId,
+                spanId: `${params.executionId}:worker.execute`,
+                parentSpanId: params.parentSpanId || `${params.messageId}:client.dispatch`,
+                operation: 'worker.execute',
+                component: 'worker',
+                startTs: params.startTs,
+                endTs: params.endTs,
+                status: params.status,
+                sessionId: params.sessionId,
+                executionId: params.executionId,
+                messageId: params.messageId,
+                parentMessageId: params.parentMessageId,
+                workerId: params.workerId,
+                targetAgentType: params.targetAgentType,
+                chunkCount: params.chunkCount || 0,
+                tokens: params.tokens && Object.keys(params.tokens).length > 0 ? params.tokens : undefined,
+                errorType: params.errorType || '',
+                errorMessage: params.errorMessage || '',
+            } as TraceSpan);
+        } catch (err) {
+            // best effort
         }
     }
 

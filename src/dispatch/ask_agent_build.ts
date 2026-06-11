@@ -37,6 +37,7 @@ export function buildAskAgentPublishArtifacts(
             userCode: input.userCode,
             userName: input.userName,
             metadata: input.metadata,
+            langfuseParentObservationId: input.langfuseParentObservationId || '',
         }),
         input.content as string | unknown[],
         waitForReply,

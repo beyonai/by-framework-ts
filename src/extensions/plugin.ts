@@ -100,5 +100,19 @@ export abstract class Plugin {
     async onTaskComplete(_context: AgentContext, _result: any): Promise<void> {}
     async onTaskError(_context: AgentContext, _error: Error): Promise<void> {}
     async onTaskCancel(_context: AgentContext, _command: any): Promise<void> {}
+
+    /** Triggered before enqueuing a call to another agent. */
+    async onCallAgentStart(_context: AgentContext, _command: any): Promise<void> {}
+    /** Triggered after successfully enqueuing a call to another agent. */
+    async onCallAgentComplete(_context: AgentContext, _command: any, _result: any): Promise<void> {}
+    /** Triggered when enqueuing a call to another agent fails. */
+    async onCallAgentError(_context: AgentContext, _command: any, _error: Error): Promise<void> {}
+
+    /** Triggered before enqueueing a ResumeCommand back to the caller agent. */
+    async onAgentReturnStart(_context: AgentContext, _command: any, _callbackCommand: any): Promise<void> {}
+    /** Triggered after successfully enqueueing a ResumeCommand to the caller. */
+    async onAgentReturnComplete(_context: AgentContext, _command: any, _callbackCommand: any): Promise<void> {}
+    /** Triggered when enqueueing a ResumeCommand to the caller fails. */
+    async onAgentReturnError(_context: AgentContext, _command: any, _callbackCommand: any, _error: Error): Promise<void> {}
 }
 

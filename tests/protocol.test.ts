@@ -126,7 +126,7 @@ describe('Protocol layer', () => {
             expect(dict.message_id).toBe('msg-1');
             expect(dict.session_id).toBe('sess-1');
             expect(dict.trace_id).toBe('trace-1');
-            expect(dict.source_agent_id).toBe('src-agent');
+            expect(dict.source_agent_type).toBe('src-agent');
             expect(dict.target_agent_type).toBe('tgt-agent');
             expect(dict.parent_message_id).toBe('parent-1');
             expect(dict.task_group_id).toBe('grp-1');

@@ -41,6 +41,33 @@ export class QueueNames {
   static task_group_results(groupId: string): string {
     return `byai_gateway:task_group:${groupId}:results`;
   }
+
+  // --- Trace observability keys ---
+
+  /** Trace-level metadata hash (start_ts, status, session_id, …). */
+  static trace_meta(traceId: string): string {
+    return `byai_gateway:trace:${traceId}:meta`;
+  }
+
+  /** Ordered list of serialised span JSON entries for a trace. */
+  static trace_spans(traceId: string): string {
+    return `byai_gateway:trace:${traceId}:spans`;
+  }
+
+  /** Sorted set index: session → trace IDs (score = start_ts). */
+  static trace_index_session(sessionId: string): string {
+    return `byai_gateway:trace:idx:session:${sessionId}`;
+  }
+
+  /** Sorted set index: worker → trace IDs (score = start_ts). */
+  static trace_index_worker(workerId: string): string {
+    return `byai_gateway:trace:idx:worker:${workerId}`;
+  }
+
+  /** Sorted set index: agent type → trace IDs (score = start_ts). */
+  static trace_index_agent(agentType: string): string {
+    return `byai_gateway:trace:idx:agent:${agentType}`;
+  }
 }
 
 export class RegistryKeys {

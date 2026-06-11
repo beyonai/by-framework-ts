@@ -69,7 +69,7 @@ describe('GatewayProcessor', () => {
         expect(callbackData.body.extra_payload).toEqual({ debug_id: 'abc' });
         expect(callbackData.header.metadata).toEqual({ tokens: 123 });
         expect(callbackData.header.target_agent_type).toBe('agent-a');
-        expect(callbackData.header.source_agent_id).toBe('agent-b');
+        expect(callbackData.header.source_agent_type).toBe('agent-b');
         expect(callbackData.header.parent_message_id).toBe('msg-1');
     });
 

@@ -1,11 +1,14 @@
 import { ActionType } from './action_type';
 import { MessageHeader } from './message_header';
 
-function hasContent(value: string | ReadonlyArray<unknown>): boolean {
+function hasContent(value: unknown): boolean {
+    if (value === null || value === undefined) {
+        return false;
+    }
     if (typeof value === 'string') {
         return value.trim() !== '';
     }
-    return Array.isArray(value) && value.length > 0;
+    return !Array.isArray(value) || value.length > 0;
 }
 
 export abstract class BaseCommand {
@@ -33,7 +36,7 @@ export class AskAgentCommand extends BaseCommand {
 
     constructor(
         public readonly header: MessageHeader,
-        public readonly content: string | ReadonlyArray<unknown>,
+        public readonly content: unknown,
         public readonly waitForReply: boolean = false,
         public readonly extraPayload: Readonly<Record<string, unknown>> = {}
     ) {
@@ -66,7 +69,7 @@ export class AskAgentCommand extends BaseCommand {
         const body = { ...(data.body as Record<string, unknown> || {}) };
         return new AskAgentCommand(
             MessageHeader.fromDict(data.header as Record<string, unknown>),
-            (body.content as string | ReadonlyArray<unknown>) || '',
+            body.content !== undefined ? body.content : '',
             Boolean(body.wait_for_reply),
             { ...(body.extra_payload as Record<string, unknown> || {}) }
         );
@@ -79,7 +82,7 @@ export class ResumeCommand extends BaseCommand {
 
     constructor(
         public readonly header: MessageHeader,
-        public readonly content: string | ReadonlyArray<unknown> = '',
+        public readonly content: unknown = '',
         public readonly status: string = '',
         public readonly replyData: unknown = null,
         public readonly extraPayload: Readonly<Record<string, unknown>> = {}
@@ -114,7 +117,7 @@ export class ResumeCommand extends BaseCommand {
         const body = { ...(data.body as Record<string, unknown> || {}) };
         return new ResumeCommand(
             MessageHeader.fromDict(data.header as Record<string, unknown>),
-            (body.content as string | ReadonlyArray<unknown>) || '',
+            body.content !== undefined ? body.content : '',
             (body.status as string) || '',
             body.reply_data ?? null,
             { ...(body.extra_payload as Record<string, unknown> || {}) }

@@ -11,6 +11,8 @@ import { initializeQueuedExecution } from './dispatch/execution_init';
 import { publishAskAgentCommand } from './dispatch/publish_ask_agent';
 import { BaiYingMessage } from './protocol/message';
 import { GatewayInterceptor } from './interceptors';
+import { SpanRecorder, spanIdHex } from './trace/span_recorder';
+import type { TraceSpan } from './trace/span_recorder';
 
 // === Types ===
 interface RouteResolution {
@@ -39,11 +41,18 @@ export class GatewayClient {
     private readonly redis: Redis;
     private readonly registry: WorkerRegistry;
     private readonly interceptors: GatewayInterceptor[];
+    readonly spanRecorder: SpanRecorder;
 
-    public constructor(registry?: WorkerRegistry, redisClient?: Redis, interceptors?: GatewayInterceptor[]) {
+    public constructor(
+        registry?: WorkerRegistry,
+        redisClient?: Redis,
+        interceptors?: GatewayInterceptor[],
+        spanRecorder?: SpanRecorder,
+    ) {
         this.redis = redisClient ?? getRedis();
         this.registry = registry ?? new WorkerRegistry(this.redis);
         this.interceptors = interceptors ?? [];
+        this.spanRecorder = spanRecorder ?? new SpanRecorder(this.redis);
     }
 
     addInterceptor(interceptor: GatewayInterceptor): void {
@@ -353,6 +362,10 @@ export class GatewayClient {
         const messageId = params.messageId || `msg-${uuidv4().slice(0, 8)}`;
         const traceId = params.traceId || uuidv4().replace(/-/g, '');
 
+        // Compute deterministic parent span ID so the worker can link its
+        // worker.execute span back to this client.dispatch span.
+        const traceParentSpanId = spanIdHex(`${messageId}:client.dispatch`);
+
         // 序列化 content
         let formattedContent: string | unknown[];
         if (typeof requestParams.content === 'string') {
@@ -387,6 +400,7 @@ export class GatewayClient {
             userCode: requestParams.userCode || '',
             userName: requestParams.userName || '',
             metadata: requestParams.metadata,
+            traceParentSpanId,
         });
 
         const payload = requestParams.extraPayload ?? {};
@@ -402,6 +416,7 @@ export class GatewayClient {
             mergedPayload
         );
 
+        const dispatchStartedAt = Date.now();
         if (command instanceof AskAgentCommand) {
             await publishAskAgentCommand({
                 redis: this.redis,
@@ -428,6 +443,18 @@ export class GatewayClient {
             await this.redis.xadd(route.streamName, '*', 'data', JSON.stringify(command.toDict()));
         }
 
+        // Record the root client.dispatch span — this is the trace root.
+        await this._recordClientDispatchSpan({
+            traceId,
+            messageId,
+            sessionId: requestParams.sessionId,
+            parentMessageId: requestParams.parentMessageId || '',
+            targetAgentType: requestParams.targetAgentType,
+            targetWorkerId: route.targetWorkerId,
+            startTs: dispatchStartedAt,
+            endTs: Date.now(),
+        });
+
         return {
             success: true,
             message_id: messageId,
@@ -436,5 +463,38 @@ export class GatewayClient {
             timestamp: Date.now(),
             status: ExecutionStatus.QUEUED,
         };
+    }
+
+    private async _recordClientDispatchSpan(params: {
+        traceId: string;
+        messageId: string;
+        sessionId: string;
+        parentMessageId: string;
+        targetAgentType: string;
+        targetWorkerId: string;
+        startTs: number;
+        endTs: number;
+    }): Promise<void> {
+        try {
+            const span: TraceSpan = {
+                traceId:        params.traceId,
+                spanId:         `${params.messageId}:client.dispatch`,
+                parentSpanId:   '',
+                operation:      'client.dispatch',
+                component:      'client',
+                startTs:        params.startTs,
+                endTs:          params.endTs,
+                status:         'COMPLETED',
+                sessionId:      params.sessionId,
+                messageId:      params.messageId,
+                parentMessageId: params.parentMessageId,
+                workerId:       params.targetWorkerId,
+                sourceAgentType: 'client',
+                targetAgentType: params.targetAgentType,
+            };
+            await this.spanRecorder.recordSpan(span);
+        } catch (err) {
+            console.debug('[GatewayClient] Failed to record client dispatch span:', err);
+        }
     }
 }

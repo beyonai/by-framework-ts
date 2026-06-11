@@ -267,6 +267,42 @@ export class PluginRegistry {
         }
     }
 
+    async onCallAgentStart(context: AgentContext, command: any): Promise<void> {
+        for (const plugin of this.getActivePlugins()) {
+            await this.executeHook(plugin, 'onCallAgentStart', () => plugin.onCallAgentStart(context, command));
+        }
+    }
+
+    async onCallAgentComplete(context: AgentContext, command: any, result: any): Promise<void> {
+        for (const plugin of this.getActivePlugins()) {
+            await this.executeHook(plugin, 'onCallAgentComplete', () => plugin.onCallAgentComplete(context, command, result));
+        }
+    }
+
+    async onCallAgentError(context: AgentContext, command: any, error: Error): Promise<void> {
+        for (const plugin of this.getActivePlugins()) {
+            await this.executeHook(plugin, 'onCallAgentError', () => plugin.onCallAgentError(context, command, error));
+        }
+    }
+
+    async onAgentReturnStart(context: AgentContext, command: any, callbackCommand: any): Promise<void> {
+        for (const plugin of this.getActivePlugins()) {
+            await this.executeHook(plugin, 'onAgentReturnStart', () => plugin.onAgentReturnStart(context, command, callbackCommand));
+        }
+    }
+
+    async onAgentReturnComplete(context: AgentContext, command: any, callbackCommand: any): Promise<void> {
+        for (const plugin of this.getActivePlugins()) {
+            await this.executeHook(plugin, 'onAgentReturnComplete', () => plugin.onAgentReturnComplete(context, command, callbackCommand));
+        }
+    }
+
+    async onAgentReturnError(context: AgentContext, command: any, callbackCommand: any, error: Error): Promise<void> {
+        for (const plugin of this.getActivePlugins()) {
+            await this.executeHook(plugin, 'onAgentReturnError', () => plugin.onAgentReturnError(context, command, callbackCommand, error));
+        }
+    }
+
     getHookStats(): Record<string, Record<string, HookStatsSnapshotItem>> {
         const snapshot: Record<string, Record<string, HookStatsSnapshotItem>> = {};
         for (const [pluginName, pluginStats] of this.hookStats.entries()) {

@@ -18,6 +18,7 @@ import { GatewayDataEmitter } from './emitter';
 import { AgentConfig } from './extensions/agent_config';
 import type { PluginRegistry } from './extensions/registry';
 import { HistoryProvider } from './history';
+import { SpanRecorder, spanIdHex, TraceSpan } from './trace/span_recorder';
 
 export class TaskCancelledError extends Error {
     constructor(message: string = 'task cancelled') {
@@ -69,6 +70,12 @@ export class AgentContext {
     private _permissionTransferred = false;
     private _isStreamFinished = false;
 
+    public readonly executionId: string;
+    public readonly spanRecorder: SpanRecorder;
+    public _chunkCount: number = 0;
+    private _tokenUsage: Record<string, any> = {};
+    private _traceParentObservationId: string = '';
+
     constructor(
         public readonly sessionId: string,
         public readonly traceId: string,
@@ -78,9 +85,21 @@ export class AgentContext {
         public readonly currentCommand?: unknown,
         private readonly cancelSignal?: AbortSignal | CancelSignalLegacy,
         private readonly cancelReason: string = '',
-        public readonly pluginRegistry?: PluginRegistry
+        public readonly pluginRegistry?: PluginRegistry,
+        executionId?: string,
+        spanRecorder?: SpanRecorder,
     ) {
         this.emitter = new GatewayDataEmitter(this.redis);
+        this.executionId = executionId || '';
+        this.spanRecorder = spanRecorder || new SpanRecorder(redis);
+    }
+
+    get traceParentObservationId(): string {
+        return this._traceParentObservationId;
+    }
+
+    set traceParentObservationId(id: string) {
+        this._traceParentObservationId = id || '';
     }
 
     setAgentConfigs(newConfigs: ReadonlyArray<AgentConfig>): void {
@@ -119,6 +138,20 @@ export class AgentContext {
         this._isStreamFinished = finished;
     }
 
+    recordTokenUsage(params: { promptTokens?: number; completionTokens?: number; model?: string }): void {
+        const { promptTokens = 0, completionTokens = 0, model } = params;
+        this._tokenUsage['prompt_tokens'] = (this._tokenUsage['prompt_tokens'] || 0) + Math.max(0, promptTokens);
+        this._tokenUsage['completion_tokens'] = (this._tokenUsage['completion_tokens'] || 0) + Math.max(0, completionTokens);
+        this._tokenUsage['total_tokens'] = this._tokenUsage['prompt_tokens'] + this._tokenUsage['completion_tokens'];
+        if (model) {
+            this._tokenUsage['model'] = model;
+        }
+    }
+
+    getTokenUsage(): Record<string, any> {
+        return { ...this._tokenUsage };
+    }
+
     async callTool(name: string, kwargs: Readonly<Record<string, unknown>> = {}): Promise<unknown> {
         for (const config of this.agentConfigs) {
             const tool = config.tools?.[name];
@@ -151,9 +184,6 @@ export class AgentContext {
         return registry.getAllWorkers() as unknown as Record<string, unknown>;
     }
 
-    /**
-     * Update the execution status for the current message from within business code.
-     */
     async updateExecutionState(status: string): Promise<void> {
         const { WorkerRegistry } = await import('./registry');
         const registry = new WorkerRegistry(this.redis);
@@ -185,6 +215,7 @@ export class AgentContext {
         if (content) {
             this.responseBuffer = [...this.responseBuffer, content];
         }
+        this._chunkCount += 1;
         await this.emitter.emitChunk(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
@@ -246,10 +277,24 @@ export class AgentContext {
         readonly messageId?: string;
         readonly parentMessageId?: string;
         readonly probeAgentType?: boolean;
+        /** Explicitly set the Langfuse parent observation ID for this sub-call.
+         *  Overrides context.traceParentObservationId when provided. */
+        readonly langfuseParentObservationId?: string;
     }): Promise<CallAgentResult> {
         const { WorkerRegistry } = await import('./registry');
         const registry = new WorkerRegistry(this.redis);
         const deps = createRedisCallAgentDeps({ redis: this.redis, registry, queueNames: QueueNames });
+
+        // Pre-generate messageId so we can compute trace span IDs before dispatch
+        const messageId = params.messageId || this.generateMessageId();
+        const callParentSpanId = `${messageId}:client.dispatch`;
+        const traceParentSpanId = this._resolveCallTraceParentSpanId(callParentSpanId);
+
+        const mergedMetadata: Record<string, unknown> = {
+            ...(params.metadata || {}),
+            trace_parent_span_id: traceParentSpanId,
+            framework_parent_span_id: callParentSpanId,
+        };
 
         const input: CallAgentPublishInput = {
             sessionId: this.sessionId,
@@ -263,38 +308,105 @@ export class AgentContext {
             userCode: params.userCode,
             userName: params.userName,
             taskGroupId: params.taskGroupId,
-            metadata: params.metadata,
-            messageId: params.messageId,
+            metadata: mergedMetadata,
+            messageId,
             parentMessageId: params.parentMessageId,
             probeAgentType: params.probeAgentType,
+            langfuseParentObservationId: params.langfuseParentObservationId ?? this.traceParentObservationId ?? '',
         };
 
-        const result = await publishCallAgent(deps, input);
+        if (this.pluginRegistry) {
+            await this.pluginRegistry.onCallAgentStart(this, params);
+        }
 
-        if (result.runtimeHint === 'suspend') {
+        const dispatchStartTs = Date.now();
+        let raw: any;
+        try {
+            raw = await publishCallAgent(deps, input);
+        } catch (error: any) {
+            if (this.pluginRegistry) {
+                await this.pluginRegistry.onCallAgentError(this, params, error instanceof Error ? error : new Error(String(error)));
+            }
+            throw error;
+        }
+
+        await this._recordAgentDispatchSpan({
+            messageId: raw.messageId || messageId,
+            parentMessageId: params.parentMessageId || this.currentMessageId,
+            sourceAgentType: params.waitForReply !== false ? this.currentAgentType : '',
+            targetAgentType: params.targetAgentType,
+            routePolicy: 'FAIL_FAST',
+            routeStatus: raw.status,
+            startTs: dispatchStartTs,
+            endTs: Date.now(),
+        });
+
+        if (raw.runtimeHint === 'suspend' || params.waitForReply !== false) {
             this._isSuspended = true;
-        } else if (result.runtimeHint === 'transfer') {
+        } else if (raw.runtimeHint === 'transfer') {
             this._permissionTransferred = true;
         }
 
-        return {
-            status: result.status,
-            messageId: result.messageId,
-            parentMessageId: result.parentMessageId,
-            targetAgentType: result.targetAgentType,
-            error: result.error,
-            error_code: result.error_code,
+        const result: CallAgentResult = {
+            status: raw.status,
+            messageId: raw.messageId,
+            parentMessageId: raw.parentMessageId,
+            targetAgentType: raw.targetAgentType,
+            error: raw.error,
+            error_code: raw.error_code,
         };
+
+        if (this.pluginRegistry) {
+            await this.pluginRegistry.onCallAgentComplete(this, params, result);
+        }
+
+        return result;
+    }
+
+    private async _recordAgentDispatchSpan(params: {
+        messageId: string;
+        parentMessageId: string;
+        sourceAgentType: string;
+        targetAgentType: string;
+        routePolicy?: string;
+        routeStatus?: string;
+        workerId?: string;
+        startTs: number;
+        endTs: number;
+    }): Promise<void> {
+        const parentSpanId = this.executionId
+            ? `${this.executionId}:worker.execute`
+            : `${this.currentMessageId}:worker.execute`;
+        try {
+            await this.spanRecorder.recordSpan({
+                traceId: this.traceId,
+                spanId: `${params.messageId}:client.dispatch`,
+                parentSpanId,
+                operation: 'client.dispatch',
+                component: 'agent_context',
+                startTs: params.startTs,
+                endTs: params.endTs,
+                status: 'COMPLETED',
+                sessionId: this.sessionId,
+                messageId: params.messageId,
+                parentMessageId: params.parentMessageId,
+                workerId: params.workerId || '',
+                sourceAgentType: params.sourceAgentType,
+                targetAgentType: params.targetAgentType,
+                routePolicy: params.routePolicy || '',
+                routeStatus: params.routeStatus || '',
+            } as TraceSpan);
+        } catch (err) {
+            // best effort
+        }
+    }
+
+    private _resolveCallTraceParentSpanId(callParentSpanId: string): string {
+        return spanIdHex(callParentSpanId);
     }
 
     /**
      * Dispatch multiple tasks concurrently as a group (Scatter-Gather).
-     *
-     * @param tasks - Array of task objects with targetAgentType, content, payload
-     * @param waitForReply - If true, sets up Redis counters to wait for all
-     * @param messageId - Optional custom message ID
-     * @param parentMessageId - Optional custom parent message ID
-     * @returns DispatchGroupResult with status, taskGroupId, and dispatched tasks
      */
     async dispatchGroup(params: {
         readonly tasks: ReadonlyArray<{
@@ -315,6 +427,7 @@ export class AgentContext {
 
         const taskGroupId = `tg-${uuidv4().slice(0, 8)}`;
         const wait = waitForReply ?? true;
+        const groupDispatchStartTs = Date.now();
 
         // Setup Redis counters if waiting for replies
         if (wait) {
@@ -338,6 +451,16 @@ export class AgentContext {
             const currentMessageId = this.generateMessageId();
             const currentParentMessageId = parentMessageId || this.currentMessageId;
 
+            // Compute trace span IDs for this sub-task
+            const callParentSpanId = `${currentMessageId}:client.dispatch`;
+            const traceParentSpanId = this._resolveCallTraceParentSpanId(callParentSpanId);
+
+            const taskMetadata: Record<string, unknown> = {
+                ...(task.metadata || {}),
+                trace_parent_span_id: traceParentSpanId,
+                framework_parent_span_id: callParentSpanId,
+            };
+
             const mergedPayload: Record<string, unknown> = { ...(task.payload || {}) };
             if (wait) {
                 mergedPayload.wait_for_reply = true;
@@ -349,12 +472,18 @@ export class AgentContext {
                     targetAgentType: task.targetAgentType,
                     parentMessageId: currentParentMessageId,
                     taskGroupId: taskGroupId,
-                    metadata: task.metadata,
+                    metadata: taskMetadata,
+                    traceParentSpanId,
+                    langfuseParentObservationId: this.traceParentObservationId || '',
                 }),
                 task.content,
                 wait,
                 Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
             );
+
+            if (this.pluginRegistry) {
+                await this.pluginRegistry.onCallAgentStart(this, command);
+            }
 
             // Initialize execution record for each dispatched task
             await dispatchRegistry.initializeExecution({
@@ -372,17 +501,74 @@ export class AgentContext {
                 cancel_reason: '',
             });
 
-            await this.redis.xadd(
-                QueueNames.ctrl_stream(task.targetAgentType),
-                '*',
-                'data',
-                JSON.stringify(command.toDict())
-            );
+            const dispatchStartTs = Date.now();
+            try {
+                await this.redis.xadd(
+                    QueueNames.ctrl_stream(task.targetAgentType),
+                    '*',
+                    'data',
+                    JSON.stringify(command.toDict())
+                );
+            } catch (error: any) {
+                if (this.pluginRegistry) {
+                    await this.pluginRegistry.onCallAgentError(this, command, error instanceof Error ? error : new Error(String(error)));
+                }
+                throw error;
+            }
+
+            await this._recordAgentDispatchSpan({
+                messageId: currentMessageId,
+                parentMessageId: currentParentMessageId,
+                sourceAgentType: wait ? this.currentAgentType : '',
+                targetAgentType: task.targetAgentType,
+                routePolicy: 'SEND_ANYWAY',
+                routeStatus: 'GROUP_DISPATCH',
+                startTs: dispatchStartTs,
+                endTs: Date.now(),
+            });
+
+            const taskResult = {
+                status: AgentState.QUEUED,
+                messageId: currentMessageId,
+                parentMessageId: currentParentMessageId,
+                targetAgentType: task.targetAgentType,
+            };
+            if (this.pluginRegistry) {
+                await this.pluginRegistry.onCallAgentComplete(this, command, taskResult);
+            }
 
             dispatchedTasks.push({
                 message_id: currentMessageId,
                 target_agent_type: task.targetAgentType,
             });
+        }
+
+        // Record aggregate span for the entire group dispatch
+        const groupParentSpanId = this.executionId
+            ? `${this.executionId}:worker.execute`
+            : `${this.currentMessageId}:worker.execute`;
+        try {
+            await this.spanRecorder.recordSpan({
+                traceId: this.traceId,
+                spanId: `${taskGroupId}:agent.dispatch_group`,
+                parentSpanId: groupParentSpanId,
+                operation: 'agent.dispatch_group',
+                component: 'agent_context',
+                startTs: groupDispatchStartTs,
+                endTs: Date.now(),
+                status: 'COMPLETED',
+                sessionId: this.sessionId,
+                executionId: this.executionId,
+                messageId: this.currentMessageId,
+                targetAgentType: this.currentAgentType,
+                metadata: {
+                    task_group_id: taskGroupId,
+                    task_count: tasks.length,
+                    wait_for_reply: wait,
+                },
+            } as TraceSpan);
+        } catch (err) {
+            // best effort
         }
 
         return {
@@ -394,10 +580,6 @@ export class AgentContext {
 
     /**
      * Collect results from all tasks in a group.
-     *
-     * @param taskGroupId - The task group ID returned by dispatchGroup
-     * @param timeout - Maximum time to wait in seconds (default 30)
-     * @returns Array of results from all completed tasks
      */
     async collectGroupResults(taskGroupId: string, timeout: number = 30): Promise<GroupResult[]> {
         if (!taskGroupId) {

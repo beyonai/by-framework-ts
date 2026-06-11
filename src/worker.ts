@@ -17,6 +17,7 @@ import { HistoryProvider } from './history';
 import { WorkspaceManager } from './workspace';
 import { HookSandbox, getActiveWorkspace, setActiveWorkspace } from './sandbox';
 import { FileStorage } from './runtime/filestore/base';
+import { SpanRecorder } from './trace/span_recorder';
 
 // === Types ===
 interface HandleMessageOptions {
@@ -26,6 +27,12 @@ interface HandleMessageOptions {
         readonly parentMessageId?: string;
         readonly isResumed?: boolean;
     };
+    /** Execution ID pre-computed by runner; propagated into AgentContext for trace linkage. */
+    readonly executionId?: string;
+    /** SpanRecorder from runner; reused in AgentContext so spans share the same exporter. */
+    readonly spanRecorder?: SpanRecorder;
+    /** Mutable ref filled with the AgentContext once it is created; lets runner read telemetry. */
+    readonly executionRef?: { context: AgentContext | null };
 }
 
 interface CancelSignalLegacy {
@@ -113,9 +120,14 @@ export abstract class GatewayWorker {
             command,
             options.cancelSignal,
             options.cancelReason || '',
-            this.pluginRegistry
+            this.pluginRegistry,
+            options.executionId || '',
+            options.spanRecorder
         );
         context.setAgentConfigs(this.pluginRegistry.agentConfigs);
+        if (options.executionRef) {
+            options.executionRef.context = context;
+        }
 
         const isResume = command instanceof ResumeCommand;
         const sourceAgentType = command.header.sourceAgentType;
@@ -140,7 +152,7 @@ export abstract class GatewayWorker {
         try {
             await this.pluginRegistry.onTaskStart(context);
             if (!isResume && command instanceof AskAgentCommand) {
-                await HistoryProvider.saveMessage(command.header.sessionId, 'user', command.content, {
+                await HistoryProvider.saveMessage(command.header.sessionId, 'user', command.content as any, {
                     message_id: command.header.messageId,
                     trace_id: command.header.traceId,
                 });
@@ -205,11 +217,20 @@ export abstract class GatewayWorker {
 
             if (hasSourceAgent) {
                 permissionTransferred = true;
-                await this.enqueueAgentReturn(command, taskResult.status, taskResult.replyData, {
+                const returnOptions = {
                     content: taskResult.content,
                     metadata: taskResult.metadata,
                     extraPayload: taskResult.extraPayload,
-                });
+                };
+                const returnInfo = { status: taskResult.status, replyData: taskResult.replyData, ...returnOptions };
+                await this.pluginRegistry.onAgentReturnStart(context, command, returnInfo);
+                try {
+                    await this.enqueueAgentReturn(command, taskResult.status, taskResult.replyData, returnOptions);
+                    await this.pluginRegistry.onAgentReturnComplete(context, command, returnInfo);
+                } catch (returnErr: any) {
+                    await this.pluginRegistry.onAgentReturnError(context, command, returnInfo, returnErr instanceof Error ? returnErr : new Error(String(returnErr)));
+                    throw returnErr;
+                }
             }
             await this.pluginRegistry.onTaskComplete(context, result);
 
@@ -250,7 +271,15 @@ export abstract class GatewayWorker {
                     }
                 }
                 if (shouldCallback) {
-                    await this.enqueueAgentReturn(command, AgentState.CANCELLED, { reason: String(error instanceof Error ? error.message : error) });
+                    const cancelReplyData = { reason: String(error instanceof Error ? error.message : error) };
+                    const cancelReturnInfo = { status: AgentState.CANCELLED, replyData: cancelReplyData };
+                    await this.pluginRegistry.onAgentReturnStart(context, command, cancelReturnInfo);
+                    try {
+                        await this.enqueueAgentReturn(command, AgentState.CANCELLED, cancelReplyData);
+                        await this.pluginRegistry.onAgentReturnComplete(context, command, cancelReturnInfo);
+                    } catch (returnErr: any) {
+                        await this.pluginRegistry.onAgentReturnError(context, command, cancelReturnInfo, returnErr instanceof Error ? returnErr : new Error(String(returnErr)));
+                    }
                 }
 
                 const shouldEmitStreamEnd = !hasSourceAgent && !permissionTransferred;
@@ -264,7 +293,15 @@ export abstract class GatewayWorker {
             const err = error instanceof Error ? error : new Error(String(error));
             console.error(`[${this.workerId}] Task failed:`, err);
             if (hasSourceAgent) {
-                await this.enqueueAgentReturn(command, AgentState.FAILED, { error: String(error) });
+                const failedReplyData = { error: String(error) };
+                const failedReturnInfo = { status: AgentState.FAILED, replyData: failedReplyData };
+                await this.pluginRegistry.onAgentReturnStart(context, command, failedReturnInfo);
+                try {
+                    await this.enqueueAgentReturn(command, AgentState.FAILED, failedReplyData);
+                    await this.pluginRegistry.onAgentReturnComplete(context, command, failedReturnInfo);
+                } catch (returnErr: any) {
+                    await this.pluginRegistry.onAgentReturnError(context, command, failedReturnInfo, returnErr instanceof Error ? returnErr : new Error(String(returnErr)));
+                }
             }
             await this.pluginRegistry.onTaskError(context, err);
 

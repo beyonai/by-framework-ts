@@ -55,19 +55,54 @@ describe('command wire format', () => {
                 message_id: 'msg-1',
                 session_id: 'sess-1',
                 trace_id: 'trace-1',
-                source_agent_id: '',
+                source_agent_type: '',
                 target_agent_type: 'demo-agent-ts',
                 parent_message_id: '',
                 task_group_id: '',
                 user_code: 'tenant-1',
                 user_name: '',
                 metadata: {},
+                trace_parent_span_id: '',
+                langfuse_parent_observation_id: '',
             },
             body: {
                 content: 'hello world',
                 wait_for_reply: false,
                 extra_payload: { attachments: [] },
             },
+        });
+    });
+
+    test('decodes ask agent command with object content', () => {
+        const command = commandFromDict({
+            action_type: ActionType.ASK_AGENT,
+            header: {
+                message_id: 'msg-1',
+                session_id: 'sess-1',
+                trace_id: 'trace-1',
+                source_agent_type: '',
+                target_agent_type: 'demo-agent-ts',
+                parent_message_id: '',
+                task_group_id: '',
+                user_code: 'tenant-1',
+                user_name: '',
+                metadata: {},
+                trace_parent_span_id: '',
+                langfuse_parent_observation_id: '',
+            },
+            body: {
+                content: {
+                    role: 'user',
+                    content: { text: '你好', files: [] }
+                },
+                wait_for_reply: false,
+            },
+        });
+
+        expect(command).toBeInstanceOf(AskAgentCommand);
+        expect((command as AskAgentCommand).content).toEqual({
+            role: 'user',
+            content: { text: '你好', files: [] }
         });
     });
 
