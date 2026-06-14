@@ -9,6 +9,8 @@ export class WorkerHeartbeat {
     private leaseTtlSeconds: number;
     private lifecycleCallback?: (lifecycle: string) => void;
     private denylistRefresh?: (denied: Set<string>) => void;
+    private healthCheck?: () => boolean;
+    private onUnhealthy?: () => void;
 
     constructor(
         private workerId: string,
@@ -18,12 +20,16 @@ export class WorkerHeartbeat {
         private intervalMs: number = RegistryKeys.WORKER_DEFAULT_HEARTBEAT_INTERVAL_SECONDS * 1000,
         leaseTtlSeconds?: number,
         lifecycleCallback?: (lifecycle: string) => void,
-        denylistRefresh?: (denied: Set<string>) => void
+        denylistRefresh?: (denied: Set<string>) => void,
+        healthCheck?: () => boolean,
+        onUnhealthy?: () => void
     ) {
         this.registry = registry || new WorkerRegistry(this.redis);
         this.leaseTtlSeconds = leaseTtlSeconds ?? RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS;
         this.lifecycleCallback = lifecycleCallback;
         this.denylistRefresh = denylistRefresh;
+        this.healthCheck = healthCheck;
+        this.onUnhealthy = onUnhealthy;
     }
 
     async start(): Promise<void> {
@@ -54,6 +60,15 @@ export class WorkerHeartbeat {
 
         this.intervalId = setInterval(async () => {
             try {
+                // Health check: if the consumer loop has stalled, stop the heartbeat
+                // so the lease expires and the worker is evicted from routing.
+                if (this.healthCheck && !this.healthCheck()) {
+                    console.error(`[${this.workerId}] Heartbeat stopping: consumer loop is unhealthy`);
+                    await this.stop();
+                    if (this.onUnhealthy) this.onUnhealthy();
+                    return;
+                }
+
                 await this.registry.heartbeatWorker(this.workerId, this.leaseTtlSeconds);
 
                 // Read admin state and notify runner

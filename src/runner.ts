@@ -50,6 +50,9 @@ export class WorkerRunner {
     private evictForce: boolean = false;
     // In-memory cache of agent_types denied for this worker.
     private deniedAgentTypes: Set<string> = new Set();
+    // Consumer loop liveness tracking for health_check.
+    private lastConsumerTick: number = 0;
+    private readonly consumerHealthTimeoutMs: number = 30_000;
 
     readonly spanRecorder: SpanRecorder;
 
@@ -219,13 +222,22 @@ export class WorkerRunner {
         await this.setupStreams();
         await this.setupControlStreams();
 
-        // 3. 启动心跳 (wire lifecycle and denylist callbacks)
+        // 3. 启动心跳 (wire lifecycle, denylist, and consumer health callbacks)
         await this.worker.startHeartbeat(
             (lifecycle: string) => {
                 this.adminLifecycle = lifecycle;
             },
             (denied: Set<string>) => {
                 this.deniedAgentTypes = denied;
+            },
+            () => {
+                // health_check: consumer loop is healthy if it ticked recently
+                if (this.lastConsumerTick === 0) return true; // not started yet
+                return (Date.now() - this.lastConsumerTick) < this.consumerHealthTimeoutMs;
+            },
+            () => {
+                console.error(`[${this.worker.workerId}] Consumer loop unhealthy; stopping runner`);
+                this.running = false;
             }
         );
         this.startControlLoop();
@@ -646,6 +658,9 @@ export class WorkerRunner {
             const inFlight = new Set<Promise<void>>();
             while (this.running) {
                 try {
+                    // Update liveness tick so heartbeat health_check knows the loop is alive
+                    this.lastConsumerTick = Date.now();
+
                     // If suspended, pause without consuming
                     if (this.adminLifecycle === 'suspended') {
                         await new Promise((resolve) => setTimeout(resolve, 1000));

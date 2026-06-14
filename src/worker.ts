@@ -88,7 +88,9 @@ export abstract class GatewayWorker {
 
     async startHeartbeat(
         lifecycleCallback?: (lifecycle: string) => void,
-        denylistRefresh?: (denied: Set<string>) => void
+        denylistRefresh?: (denied: Set<string>) => void,
+        healthCheck?: () => boolean,
+        onUnhealthy?: () => void
     ): Promise<void> {
         await this.pluginRegistry.onWorkerStartup(this);
         this._heartbeat = new WorkerHeartbeat(
@@ -99,7 +101,9 @@ export abstract class GatewayWorker {
             this.heartbeatInterval * 1000,
             this.heartbeatLeaseTtlSeconds,
             lifecycleCallback,
-            denylistRefresh
+            denylistRefresh,
+            healthCheck,
+            onUnhealthy
         );
         await this._heartbeat.start();
     }

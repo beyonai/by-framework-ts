@@ -1,31 +1,48 @@
+import * as os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { Redis } from 'ioredis';
 import { getRedis } from './redis_client';
 import { RegistryKeys } from './constants';
 
+function getLocalIpAddress(): string {
+    const interfaces = os.networkInterfaces();
+    for (const iface of Object.values(interfaces)) {
+        if (!iface) continue;
+        for (const addr of iface) {
+            if (addr.family === 'IPv4' && !addr.internal) {
+                return addr.address;
+            }
+        }
+    }
+    return '';
+}
+
 interface WorkerPresence {
     readonly version: number;
     readonly token: string | null;
     readonly last_seen: number;
+    readonly ip_address?: string;
 }
 
 interface DecodedPresence {
     readonly token: string | null;
     readonly lastSeen: number;
     readonly isLegacy: boolean;
+    readonly ipAddress: string;
 }
 
-function encodeWorkerPresence(token: string | null, lastSeen: number): string {
+function encodeWorkerPresence(token: string | null, lastSeen: number, ipAddress: string = ''): string {
     return JSON.stringify({
         version: 1,
         token,
         last_seen: lastSeen,
+        ip_address: ipAddress,
     } satisfies WorkerPresence);
 }
 
 function decodeWorkerPresence(raw: string | null): DecodedPresence {
     if (raw === null) {
-        return { token: null, lastSeen: 0, isLegacy: false };
+        return { token: null, lastSeen: 0, isLegacy: false, ipAddress: '' };
     }
 
     try {
@@ -38,14 +55,15 @@ function decodeWorkerPresence(raw: string | null): DecodedPresence {
             const lastSeen = typeof record.last_seen === 'number'
                 ? record.last_seen
                 : Number(record.last_seen || 0);
-            return { token, lastSeen, isLegacy: false };
+            const ipAddress = typeof record.ip_address === 'string' ? record.ip_address : '';
+            return { token, lastSeen, isLegacy: false, ipAddress };
         }
         if (payload === 1) {
-            return { token: null, lastSeen: 0, isLegacy: true };
+            return { token: null, lastSeen: 0, isLegacy: true, ipAddress: '' };
         }
-        return { token: String(payload), lastSeen: 0, isLegacy: true };
+        return { token: String(payload), lastSeen: 0, isLegacy: true, ipAddress: '' };
     } catch {
-        return { token: raw, lastSeen: 0, isLegacy: true };
+        return { token: raw, lastSeen: 0, isLegacy: true, ipAddress: '' };
     }
 }
 
@@ -53,9 +71,11 @@ export class WorkerRegistry {
     private redis: Redis;
     private readonly REGISTRY_KEY = 'gateway:worker_registry';
     private lockTokens: Map<string, string> = new Map();
+    private readonly ipAddress: string;
 
     constructor(redisClient?: Redis) {
         this.redis = redisClient || getRedis();
+        this.ipAddress = getLocalIpAddress();
     }
 
     async registerWorker(workerId: string, agentTypes: string[]): Promise<void> {
@@ -93,7 +113,7 @@ export class WorkerRegistry {
             if (current === null) {
                 const ok = await this.redis.set(
                     key,
-                    encodeWorkerPresence(token, now),
+                    encodeWorkerPresence(token, now, this.ipAddress),
                     'EX',
                     leaseTtlSeconds,
                     'NX'
@@ -102,11 +122,11 @@ export class WorkerRegistry {
             } else if (currentPresence.token !== token) {
                 return false;
             } else {
-                await this.redis.set(key, encodeWorkerPresence(token, now), 'EX', leaseTtlSeconds);
+                await this.redis.set(key, encodeWorkerPresence(token, now, this.ipAddress), 'EX', leaseTtlSeconds);
             }
         } else {
             if (currentPresence.token !== null) return false;
-            await this.redis.set(key, encodeWorkerPresence(null, now), 'EX', leaseTtlSeconds);
+            await this.redis.set(key, encodeWorkerPresence(null, now, this.ipAddress), 'EX', leaseTtlSeconds);
         }
 
         await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
@@ -231,6 +251,7 @@ export class WorkerRegistry {
         return {
             agentTypes,
             last_seen: presence.isLegacy ? Date.now() : presence.lastSeen,
+            ip_address: presence.ipAddress,
         };
     }
 
@@ -255,7 +276,7 @@ export class WorkerRegistry {
 
         const ok = await this.redis.set(
             key,
-            encodeWorkerPresence(token, 0),
+            encodeWorkerPresence(token, 0, this.ipAddress),
             'EX',
             ttlSeconds,
             'NX'

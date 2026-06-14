@@ -35,3 +35,4 @@ export * from './http_client';
 export * from './discovery';
 export * from './trace';
 export * from './admin';
+export * from './metrics';
