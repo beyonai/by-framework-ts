@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getRedis, createRedis } from './redis_client';
 import { GatewayWorker } from './worker';
 import { QueueNames, ConsumerGroups } from './constants';
-import { AskAgentCommand, CancelTaskCommand, GatewayCommand, ResumeCommand, commandFromDict } from './protocol/commands';
+import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand, ResumeCommand, ResumeWorkerCommand, SuspendWorkerCommand, commandFromDict } from './protocol/commands';
 import { WorkerRegistry } from './registry';
 import { HistoryProvider } from './history';
 import { AgentState } from './protocol/agent_state';
@@ -45,6 +45,11 @@ export class WorkerRunner {
         AgentState.FAILED,
         AgentState.CANCELLED,
     ]);
+    // Admin-controlled lifecycle: "active" | "suspended" | "evicted"
+    private adminLifecycle: string = 'active';
+    private evictForce: boolean = false;
+    // In-memory cache of agent_types denied for this worker.
+    private deniedAgentTypes: Set<string> = new Set();
 
     readonly spanRecorder: SpanRecorder;
 
@@ -214,8 +219,15 @@ export class WorkerRunner {
         await this.setupStreams();
         await this.setupControlStreams();
 
-        // 3. 启动心跳
-        await this.worker.startHeartbeat();
+        // 3. 启动心跳 (wire lifecycle and denylist callbacks)
+        await this.worker.startHeartbeat(
+            (lifecycle: string) => {
+                this.adminLifecycle = lifecycle;
+            },
+            (denied: Set<string>) => {
+                this.deniedAgentTypes = denied;
+            }
+        );
         this.startControlLoop();
 
         console.log(`[${this.worker.workerId}] Worker environment ready.`);
@@ -259,6 +271,8 @@ export class WorkerRunner {
         const streams: string[] = [];
         const ids: string[] = [];
         for (const cap of this.worker.getAgentTypes()) {
+            // Skip streams for denied agent types
+            if (this.deniedAgentTypes.has(cap)) continue;
             streams.push(QueueNames.ctrl_stream(cap));
             ids.push('>');
         }
@@ -564,6 +578,25 @@ export class WorkerRunner {
         command: GatewayCommand
     ): Promise<void> {
         try {
+            if (command instanceof SuspendWorkerCommand) {
+                this.adminLifecycle = 'suspended';
+                console.log(`[${this.worker.workerId}] Worker suspended by admin: ${command.reason}`);
+                return;
+            }
+
+            if (command instanceof ResumeWorkerCommand) {
+                this.adminLifecycle = 'active';
+                console.log(`[${this.worker.workerId}] Worker resumed by admin`);
+                return;
+            }
+
+            if (command instanceof EvictWorkerCommand) {
+                this.adminLifecycle = 'evicted';
+                this.evictForce = command.force;
+                console.log(`[${this.worker.workerId}] Worker eviction requested by admin (force=${command.force}): ${command.reason}`);
+                return;
+            }
+
             if (!(command instanceof CancelTaskCommand)) {
                 return;
             }
@@ -613,6 +646,17 @@ export class WorkerRunner {
             const inFlight = new Set<Promise<void>>();
             while (this.running) {
                 try {
+                    // If suspended, pause without consuming
+                    if (this.adminLifecycle === 'suspended') {
+                        await new Promise((resolve) => setTimeout(resolve, 1000));
+                        continue;
+                    }
+                    // If evicted, exit the loop
+                    if (this.adminLifecycle === 'evicted') {
+                        console.log(`[${this.worker.workerId}] Eviction requested; stopping runner loop`);
+                        break;
+                    }
+
                     const messages = await this.poll();
                     for (const { streamName, msgId, data } of messages) {
                         while (inFlight.size >= this.maxConcurrency) {

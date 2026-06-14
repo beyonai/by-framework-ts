@@ -43,6 +43,10 @@ class MockRedis {
         return this.sets.get(key)?.delete(member) ? 1 : 0;
     }
 
+    async sismember(key: string, member: string): Promise<number> {
+        return (this.sets.get(key)?.has(member)) ? 1 : 0;
+    }
+
     hasZset(key: string): boolean {
         return this.zsets.has(key);
     }
@@ -105,6 +109,18 @@ class MockRedis {
             },
             expire: (key: string, seconds: number) => {
                 commands.push(() => self.expire(key, seconds));
+                return pipe;
+            },
+            sadd: (key: string, member: string) => {
+                commands.push(() => self.sadd(key, member));
+                return pipe;
+            },
+            srem: (key: string, member: string) => {
+                commands.push(() => self.srem(key, member));
+                return pipe;
+            },
+            del: (key: string) => {
+                commands.push(() => self.del(key));
                 return pipe;
             },
             exec: async () => {

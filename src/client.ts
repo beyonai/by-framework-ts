@@ -15,6 +15,23 @@ import { SpanRecorder, spanIdHex } from './trace/span_recorder';
 import type { TraceSpan } from './trace/span_recorder';
 
 // === Types ===
+type LangfuseDispatchObservation = {
+    readonly id?: string;
+    end?: (options?: { output?: unknown }) => void;
+    update?: (options: { level?: string; statusMessage?: string; output?: unknown }) => void;
+};
+
+type LangfuseDispatchFn = (params: {
+    readonly traceId: string;
+    readonly messageId: string;
+    readonly targetAgentType: string;
+    readonly sessionId: string;
+    readonly userCode: string;
+    readonly userName: string;
+    readonly content: unknown;
+    readonly metadata: Record<string, unknown>;
+}) => LangfuseDispatchObservation | null;
+
 interface RouteResolution {
     streamName: string;
     targetWorkerId: string;
@@ -42,17 +59,20 @@ export class GatewayClient {
     private readonly registry: WorkerRegistry;
     private readonly interceptors: GatewayInterceptor[];
     readonly spanRecorder: SpanRecorder;
+    private readonly langfuseDispatchFn: LangfuseDispatchFn | null;
 
     public constructor(
         registry?: WorkerRegistry,
         redisClient?: Redis,
         interceptors?: GatewayInterceptor[],
         spanRecorder?: SpanRecorder,
+        langfuseDispatchFn?: LangfuseDispatchFn | null,
     ) {
         this.redis = redisClient ?? getRedis();
         this.registry = registry ?? new WorkerRegistry(this.redis);
         this.interceptors = interceptors ?? [];
         this.spanRecorder = spanRecorder ?? new SpanRecorder(this.redis);
+        this.langfuseDispatchFn = langfuseDispatchFn ?? this.resolveLangfuseDispatchFn();
     }
 
     addInterceptor(interceptor: GatewayInterceptor): void {
@@ -67,6 +87,121 @@ export class GatewayClient {
             }
         }
         return result;
+    }
+
+    private resolveLangfuseDispatchFn(): LangfuseDispatchFn | null {
+        const publicKey = process.env.LANGFUSE_PUBLIC_KEY || '';
+        const secretKey = process.env.LANGFUSE_SECRET_KEY || '';
+        if (!publicKey || !secretKey) {
+            return null;
+        }
+
+        try {
+            // Optional dependency; GatewayClient must keep working without it.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const mod = require('langfuse') as Record<string, unknown>;
+            const Langfuse = (mod.default ?? mod.Langfuse) as
+                | (new (options: Record<string, unknown>) => {
+                    trace?: (options: Record<string, unknown>) => unknown;
+                    span?: (options: Record<string, unknown>) => LangfuseDispatchObservation;
+                })
+                | undefined;
+            if (!Langfuse) {
+                return null;
+            }
+            const client = new Langfuse({
+                publicKey,
+                secretKey,
+                baseUrl: process.env.LANGFUSE_HOST || process.env.LANGFUSE_BASE_URL || 'https://cloud.langfuse.com',
+                enabled: true,
+            });
+            return params => {
+                const safeInput = this.safeSerialize(params.content);
+                const metadata = {
+                    ...params.metadata,
+                    targetAgentType: params.targetAgentType,
+                    sessionId: params.sessionId,
+                    messageId: params.messageId,
+                };
+                client.trace?.({
+                    id: params.traceId,
+                    name: 'client.dispatch',
+                    sessionId: params.sessionId,
+                    userId: params.userCode || params.userName || undefined,
+                    input: safeInput,
+                    metadata,
+                    tags: ['by-framework'],
+                });
+                return client.span?.({
+                    id: spanIdHex(`${params.messageId}:client.dispatch`),
+                    traceId: params.traceId,
+                    name: 'client.dispatch',
+                    startTime: new Date(),
+                    input: safeInput,
+                    metadata,
+                }) ?? null;
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private safeSerialize(value: unknown): unknown {
+        if (value === null || value === undefined) return null;
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+        try {
+            return JSON.parse(JSON.stringify(value));
+        } catch {
+            return String(value);
+        }
+    }
+
+    private startLangfuseClientDispatchObservation(params: {
+        readonly traceId: string;
+        readonly messageId: string;
+        readonly targetAgentType: string;
+        readonly sessionId: string;
+        readonly userCode: string;
+        readonly userName: string;
+        readonly content: unknown;
+        readonly metadata: Record<string, unknown>;
+    }): LangfuseDispatchObservation | null {
+        if (!this.langfuseDispatchFn) {
+            return null;
+        }
+        try {
+            return this.langfuseDispatchFn(params);
+        } catch (err) {
+            console.warn('[GatewayClient] Langfuse client.dispatch observation skipped:', err);
+            return null;
+        }
+    }
+
+    private endLangfuseClientDispatchObservation(
+        observation: LangfuseDispatchObservation | null,
+        output: unknown,
+        error = ''
+    ): void {
+        if (!observation) {
+            return;
+        }
+        try {
+            if (error && observation.update) {
+                observation.update({ level: 'ERROR', statusMessage: error });
+            }
+            if (observation.end) {
+                observation.end({ output });
+                return;
+            }
+        } catch {
+            // Try the older update(output)+end() shape below.
+        }
+        try {
+            observation.update?.({ output });
+            observation.end?.();
+        } catch {
+            // best effort
+        }
     }
 
     /**
@@ -325,6 +460,39 @@ export class GatewayClient {
         };
         requestParams = this.runInterceptors(requestParams);
 
+        const messageId = params.messageId || `msg-${uuidv4().slice(0, 8)}`;
+        const traceId = params.traceId || uuidv4().replace(/-/g, '');
+        const metadata: Record<string, unknown> = { ...(requestParams.metadata || {}) };
+        let traceParentSpanId = String(
+            metadata.trace_parent_span_id || metadata.traceParentSpanId || ''
+        );
+        let langfuseParentObservationId = String(
+            metadata.langfuse_parent_observation_id || metadata.langfuseParentObservationId || ''
+        );
+        delete metadata.trace_parent_span_id;
+        delete metadata.traceParentSpanId;
+        delete metadata.langfuse_parent_observation_id;
+        delete metadata.langfuseParentObservationId;
+
+        if (!traceParentSpanId) {
+            traceParentSpanId = spanIdHex(`${messageId}:client.dispatch`);
+        }
+
+        let langfuseClientDispatch: LangfuseDispatchObservation | null = null;
+        if (!langfuseParentObservationId) {
+            langfuseClientDispatch = this.startLangfuseClientDispatchObservation({
+                traceId,
+                messageId,
+                targetAgentType: requestParams.targetAgentType,
+                sessionId: requestParams.sessionId,
+                userCode: requestParams.userCode,
+                userName: requestParams.userName,
+                content: requestParams.content,
+                metadata,
+            });
+            langfuseParentObservationId = langfuseClientDispatch?.id || traceParentSpanId;
+        }
+
         // Resolve route and optionally probe agent type/liveness
         let route: RouteResolution;
         try {
@@ -335,6 +503,11 @@ export class GatewayClient {
             }
         } catch (err) {
             const error = err instanceof Error ? err.message : String(err);
+            this.endLangfuseClientDispatchObservation(
+                langfuseClientDispatch,
+                { success: false, error },
+                error
+            );
             if (error.includes('not online')) {
                 return {
                     success: false,
@@ -358,13 +531,6 @@ export class GatewayClient {
                 error_code: ExecutionStatus.ERR_AGENT_TYPE_NOT_FOUND,
             };
         }
-
-        const messageId = params.messageId || `msg-${uuidv4().slice(0, 8)}`;
-        const traceId = params.traceId || uuidv4().replace(/-/g, '');
-
-        // Compute deterministic parent span ID so the worker can link its
-        // worker.execute span back to this client.dispatch span.
-        const traceParentSpanId = spanIdHex(`${messageId}:client.dispatch`);
 
         // 序列化 content
         let formattedContent: string | unknown[];
@@ -399,8 +565,9 @@ export class GatewayClient {
             parentMessageId: requestParams.parentMessageId || '',
             userCode: requestParams.userCode || '',
             userName: requestParams.userName || '',
-            metadata: requestParams.metadata,
+            metadata,
             traceParentSpanId,
+            langfuseParentObservationId,
         });
 
         const payload = requestParams.extraPayload ?? {};
@@ -451,11 +618,13 @@ export class GatewayClient {
             parentMessageId: requestParams.parentMessageId || '',
             targetAgentType: requestParams.targetAgentType,
             targetWorkerId: route.targetWorkerId,
+            routePolicy: requireOnline ? 'FAIL_FAST' : 'SEND_ANYWAY',
+            routeStatus: params.targetWorkerId ? 'DIRECT_WORKER' : 'DELIVER_NOW',
             startTs: dispatchStartedAt,
             endTs: Date.now(),
         });
 
-        return {
+        const response = {
             success: true,
             message_id: messageId,
             trace_id: traceId,
@@ -463,6 +632,14 @@ export class GatewayClient {
             timestamp: Date.now(),
             status: ExecutionStatus.QUEUED,
         };
+        this.endLangfuseClientDispatchObservation(langfuseClientDispatch, {
+            success: true,
+            message_id: messageId,
+            trace_id: traceId,
+            target_worker_id: route.targetWorkerId,
+            status: response.status,
+        });
+        return response;
     }
 
     private async _recordClientDispatchSpan(params: {
@@ -472,6 +649,8 @@ export class GatewayClient {
         parentMessageId: string;
         targetAgentType: string;
         targetWorkerId: string;
+        routePolicy: string;
+        routeStatus: string;
         startTs: number;
         endTs: number;
     }): Promise<void> {
@@ -491,6 +670,8 @@ export class GatewayClient {
                 workerId:       params.targetWorkerId,
                 sourceAgentType: 'client',
                 targetAgentType: params.targetAgentType,
+                routePolicy:    params.routePolicy,
+                routeStatus:    params.routeStatus,
             };
             await this.spanRecorder.recordSpan(span);
         } catch (err) {

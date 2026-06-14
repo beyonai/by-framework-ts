@@ -125,6 +125,23 @@ export class RegistryKeys {
   }
 
   /**
+   * Worker admin state HASH (fields: lifecycle, reason, updated_at).
+   * Written by WorkerManager; read by the worker on heartbeat and startup.
+   * No TTL — persists until explicitly cleared by an admin action.
+   */
+  static workerAdminState(workerId: string): string {
+    return `byai_gateway:registry:worker:admin:${workerId}`;
+  }
+
+  /**
+   * SET of worker_ids explicitly denied from consuming an agent_type stream.
+   * Written by WorkerManager; checked by workers before XREADGROUP.
+   */
+  static agentTypeDenied(agentType: string): string {
+    return `byai_gateway:registry:agent_type:denied:${agentType}`;
+  }
+
+  /**
    * Worker startup mutex lock to prevent duplicate worker_id concurrent startup.
    */
   static worker_lock(workerId: string): string {

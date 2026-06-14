@@ -176,6 +176,94 @@ export class CancelTaskCommand extends BaseCommand {
     }
 }
 
+export class SuspendWorkerCommand extends BaseCommand {
+    static actionType = ActionType.SUSPEND_WORKER;
+    readonly actionType = ActionType.SUSPEND_WORKER;
+
+    constructor(
+        public readonly header: MessageHeader,
+        public readonly reason: string = ''
+    ) {
+        super(header);
+    }
+
+    toDict(): Readonly<Record<string, unknown>> {
+        return {
+            action_type: this.actionType,
+            header: this.header.toDict(),
+            body: {
+                reason: this.reason,
+            },
+        };
+    }
+
+    static fromDict(data: Readonly<Record<string, unknown>>): SuspendWorkerCommand {
+        const body = { ...(data.body as Record<string, unknown> || {}) };
+        return new SuspendWorkerCommand(
+            MessageHeader.fromDict(data.header as Record<string, unknown>),
+            (body.reason as string) || ''
+        );
+    }
+}
+
+export class ResumeWorkerCommand extends BaseCommand {
+    static actionType = ActionType.RESUME_WORKER;
+    readonly actionType = ActionType.RESUME_WORKER;
+
+    constructor(
+        public readonly header: MessageHeader
+    ) {
+        super(header);
+    }
+
+    toDict(): Readonly<Record<string, unknown>> {
+        return {
+            action_type: this.actionType,
+            header: this.header.toDict(),
+            body: {},
+        };
+    }
+
+    static fromDict(data: Readonly<Record<string, unknown>>): ResumeWorkerCommand {
+        return new ResumeWorkerCommand(
+            MessageHeader.fromDict(data.header as Record<string, unknown>)
+        );
+    }
+}
+
+export class EvictWorkerCommand extends BaseCommand {
+    static actionType = ActionType.EVICT_WORKER;
+    readonly actionType = ActionType.EVICT_WORKER;
+
+    constructor(
+        public readonly header: MessageHeader,
+        public readonly reason: string = '',
+        public readonly force: boolean = false
+    ) {
+        super(header);
+    }
+
+    toDict(): Readonly<Record<string, unknown>> {
+        return {
+            action_type: this.actionType,
+            header: this.header.toDict(),
+            body: {
+                reason: this.reason,
+                force: this.force,
+            },
+        };
+    }
+
+    static fromDict(data: Readonly<Record<string, unknown>>): EvictWorkerCommand {
+        const body = { ...(data.body as Record<string, unknown> || {}) };
+        return new EvictWorkerCommand(
+            MessageHeader.fromDict(data.header as Record<string, unknown>),
+            (body.reason as string) || '',
+            Boolean(body.force)
+        );
+    }
+}
+
 export type GatewayCommand = BaseCommand;
 export type CommandConstructor<T extends BaseCommand = BaseCommand> = {
     actionType: string;
@@ -211,3 +299,6 @@ export function commandFromDict(data: Readonly<Record<string, unknown>>): Gatewa
 registerCommand(AskAgentCommand);
 registerCommand(ResumeCommand);
 registerCommand(CancelTaskCommand);
+registerCommand(SuspendWorkerCommand);
+registerCommand(ResumeWorkerCommand);
+registerCommand(EvictWorkerCommand);

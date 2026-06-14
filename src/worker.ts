@@ -86,7 +86,10 @@ export abstract class GatewayWorker {
         console.log(`[${this.workerId}] Received cancel request`);
     }
 
-    async startHeartbeat(): Promise<void> {
+    async startHeartbeat(
+        lifecycleCallback?: (lifecycle: string) => void,
+        denylistRefresh?: (denied: Set<string>) => void
+    ): Promise<void> {
         await this.pluginRegistry.onWorkerStartup(this);
         this._heartbeat = new WorkerHeartbeat(
             this.workerId,
@@ -94,7 +97,9 @@ export abstract class GatewayWorker {
             this.redis,
             this.registry,
             this.heartbeatInterval * 1000,
-            this.heartbeatLeaseTtlSeconds
+            this.heartbeatLeaseTtlSeconds,
+            lifecycleCallback,
+            denylistRefresh
         );
         await this._heartbeat.start();
     }

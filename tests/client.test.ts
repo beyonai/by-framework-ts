@@ -3,6 +3,7 @@ import { BaseCommand } from '../src/protocol/commands';
 import { MessageHeader } from '../src/protocol/message_header';
 import { BaiYingMessageRole } from '../src/protocol/message';
 import { ActionType } from '../src/protocol/action_type';
+import { spanIdHex } from '../src/trace/span_recorder';
 
 class CustomCommand extends BaseCommand {
     static actionType = 'CUSTOM_CLIENT';
@@ -124,6 +125,98 @@ describe('GatewayClient', () => {
             expect(callArgs[0]).toBe('byai_gateway:ctrl:worker:worker-123');
             const serializedMsg = JSON.parse(callArgs[3]);
             expect(serializedMsg.header.target_agent_type).toBe('demo-agent-ts');
+        });
+
+        it('should write client dispatch trace parents to the header', async () => {
+            const observation = {
+                id: 'obs-client-dispatch',
+                end: jest.fn(),
+                update: jest.fn(),
+            };
+            const spanRecorder = { recordSpan: jest.fn().mockResolvedValue(undefined) };
+            const dispatchFn = jest.fn().mockReturnValue(observation);
+            const tracedClient = new GatewayClient(
+                undefined,
+                mockRedis as any,
+                undefined,
+                spanRecorder as any,
+                dispatchFn
+            );
+
+            await tracedClient.sendMessage({
+                targetAgentType: 'demo-agent-ts',
+                targetWorkerId: 'worker-123',
+                sessionId: 'test-session-ts',
+                content: 'direct worker message',
+                messageId: 'msg-client',
+                traceId: 'trace-client',
+                metadata: { request_id: 'req-1' },
+            });
+
+            const callArgs = mockRedis.xadd.mock.calls[0];
+            const serializedMsg = JSON.parse(callArgs[3]);
+
+            expect(serializedMsg.header.metadata).toEqual({ request_id: 'req-1' });
+            expect(serializedMsg.header.trace_parent_span_id).toBe(
+                spanIdHex('msg-client:client.dispatch')
+            );
+            expect(serializedMsg.header.langfuse_parent_observation_id).toBe('obs-client-dispatch');
+            expect(dispatchFn).toHaveBeenCalledWith(expect.objectContaining({
+                traceId: 'trace-client',
+                messageId: 'msg-client',
+                targetAgentType: 'demo-agent-ts',
+                sessionId: 'test-session-ts',
+                content: 'direct worker message',
+                metadata: { request_id: 'req-1' },
+            }));
+            expect(observation.end).toHaveBeenCalledWith({
+                output: expect.objectContaining({
+                    success: true,
+                    message_id: 'msg-client',
+                    trace_id: 'trace-client',
+                    target_worker_id: 'worker-123',
+                }),
+            });
+            expect(spanRecorder.recordSpan).toHaveBeenCalledWith(expect.objectContaining({
+                traceId: 'trace-client',
+                spanId: 'msg-client:client.dispatch',
+                routePolicy: 'FAIL_FAST',
+                routeStatus: 'DIRECT_WORKER',
+            }));
+        });
+
+        it('should honor caller-provided trace parent metadata without leaking it', async () => {
+            const spanRecorder = { recordSpan: jest.fn().mockResolvedValue(undefined) };
+            const dispatchFn = jest.fn();
+            const tracedClient = new GatewayClient(
+                undefined,
+                mockRedis as any,
+                undefined,
+                spanRecorder as any,
+                dispatchFn
+            );
+
+            await tracedClient.sendMessage({
+                targetAgentType: 'demo-agent-ts',
+                targetWorkerId: 'worker-123',
+                sessionId: 'test-session-ts',
+                content: 'direct worker message',
+                messageId: 'msg-client',
+                traceId: 'trace-client',
+                metadata: {
+                    request_id: 'req-1',
+                    trace_parent_span_id: 'parent-span',
+                    langfuse_parent_observation_id: 'parent-observation',
+                },
+            });
+
+            const callArgs = mockRedis.xadd.mock.calls[0];
+            const serializedMsg = JSON.parse(callArgs[3]);
+
+            expect(serializedMsg.header.metadata).toEqual({ request_id: 'req-1' });
+            expect(serializedMsg.header.trace_parent_span_id).toBe('parent-span');
+            expect(serializedMsg.header.langfuse_parent_observation_id).toBe('parent-observation');
+            expect(dispatchFn).not.toHaveBeenCalled();
         });
 
         it('should correctly serialize complex message list', async () => {

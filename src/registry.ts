@@ -71,7 +71,10 @@ export class WorkerRegistry {
         await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
         for (const agentType of agentTypes) {
             await this.redis.sadd(RegistryKeys.workerDeclaredAgentTypes(workerId), agentType);
-            await this.redis.sadd(RegistryKeys.agentTypeMembers(agentType), workerId);
+            const denied = await this.isWorkerDeniedForType(agentType, workerId);
+            if (!denied) {
+                await this.redis.sadd(RegistryKeys.agentTypeMembers(agentType), workerId);
+            }
         }
     }
 
@@ -236,7 +239,12 @@ export class WorkerRegistry {
         const result: Record<string, any> = {};
         for (const id of [...workerIds].sort()) {
             const data = await this.getWorker(id);
-            if (data) result[id] = data;
+            if (data) {
+                const adminState = await this.getWorkerAdminState(id);
+                data.lifecycle = adminState.lifecycle || 'active';
+                data.lifecycle_reason = adminState.reason || '';
+                result[id] = data;
+            }
         }
         return result;
     }
@@ -499,6 +507,100 @@ export class WorkerRegistry {
             .hset(regKey, `exec:${executionId}`, JSON.stringify(current))
             .expire(regKey, RegistryKeys.DEFAULT_SESSION_TTL)
             .exec();
+    }
+
+    // --- Admin lifecycle state ---
+
+    /**
+     * Persist admin-controlled lifecycle state for a worker.
+     * Fields: lifecycle (active|suspended|evicted), reason, updated_at.
+     */
+    async setWorkerAdminState(workerId: string, lifecycle: string, reason: string = ''): Promise<void> {
+        const now = Date.now();
+        const key = RegistryKeys.workerAdminState(workerId);
+        await this.redis.pipeline()
+            .hset(key, 'lifecycle', lifecycle)
+            .hset(key, 'reason', reason)
+            .hset(key, 'updated_at', now)
+            .exec();
+    }
+
+    /**
+     * Return the admin-controlled state for a worker.
+     * Returns an empty object when no admin state has been set (default active).
+     */
+    async getWorkerAdminState(workerId: string): Promise<Record<string, string>> {
+        const raw = await this.redis.hgetall(RegistryKeys.workerAdminState(workerId));
+        if (!raw) return {};
+        return raw;
+    }
+
+    /**
+     * Remove the admin lifecycle key, restoring default-active behaviour.
+     */
+    async clearWorkerAdminState(workerId: string): Promise<void> {
+        await this.redis.del(RegistryKeys.workerAdminState(workerId));
+    }
+
+    /**
+     * SREM worker_id from every agent_type:members set it currently belongs to.
+     * Preserves the declared-agent-types key so membership can be restored later.
+     * Used by suspend and evict to make the worker immediately invisible to routing.
+     */
+    async removeWorkerFromTypeMembers(workerId: string): Promise<void> {
+        const agentTypes = await this.redis.smembers(RegistryKeys.workerDeclaredAgentTypes(workerId));
+        for (const agentType of agentTypes) {
+            await this.redis.srem(RegistryKeys.agentTypeMembers(agentType), workerId);
+        }
+    }
+
+    /**
+     * SADD worker_id back to every agent_type:members set it declared.
+     * Used by resume to make the worker immediately visible to routing again.
+     * Denylist is still respected, so denied types are re-excluded automatically.
+     */
+    async restoreWorkerToTypeMembers(workerId: string): Promise<void> {
+        const agentTypes = await this.redis.smembers(RegistryKeys.workerDeclaredAgentTypes(workerId));
+        for (const agentType of agentTypes) {
+            const denied = await this.isWorkerDeniedForType(agentType, workerId);
+            if (!denied) {
+                await this.redis.sadd(RegistryKeys.agentTypeMembers(agentType), workerId);
+            }
+        }
+    }
+
+    // --- Agent-type denylist ---
+
+    /**
+     * Add worker_id to the denylist for agent_type.
+     * Immediately removes the worker from agent_type:members as well.
+     */
+    async denyWorkerForType(agentType: string, workerId: string): Promise<void> {
+        await this.redis.pipeline()
+            .sadd(RegistryKeys.agentTypeDenied(agentType), workerId)
+            .srem(RegistryKeys.agentTypeMembers(agentType), workerId)
+            .exec();
+    }
+
+    /**
+     * Remove worker_id from the denylist for agent_type.
+     */
+    async allowWorkerForType(agentType: string, workerId: string): Promise<void> {
+        await this.redis.srem(RegistryKeys.agentTypeDenied(agentType), workerId);
+    }
+
+    /**
+     * Return true if worker_id is on the denylist for agent_type.
+     */
+    async isWorkerDeniedForType(agentType: string, workerId: string): Promise<boolean> {
+        return Boolean(await this.redis.sismember(RegistryKeys.agentTypeDenied(agentType), workerId));
+    }
+
+    /**
+     * Return all worker_ids on the denylist for agent_type.
+     */
+    async getAgentTypeDenylist(agentType: string): Promise<string[]> {
+        return this.redis.smembers(RegistryKeys.agentTypeDenied(agentType));
     }
 
     private encodeExecution(execution: Record<string, any>): Record<string, string> {
