@@ -21,6 +21,20 @@ export interface RedisConnectionConfig {
     clusterNodes?: RedisClusterNode[];
 }
 
+function resolveMode(options: RedisConnectionConfig): RedisMode {
+    const raw = options.mode ?? (process.env.REDIS_MODE as RedisMode | undefined) ?? 'standalone';
+    if (raw !== 'standalone' && raw !== 'cluster') {
+        // A typo (e.g. 'cluser') or the reserved-but-unimplemented 'sentinel'
+        // value must not silently fall through to standalone — that would
+        // connect to the wrong topology instead of failing fast.
+        throw new RedisConnectionError(
+            `Invalid REDIS_MODE: '${raw}' (must be 'standalone' or 'cluster'; ` +
+                `'sentinel' is reserved for a future phase and not implemented yet)`
+        );
+    }
+    return raw;
+}
+
 function parseClusterNodesFromEnv(): RedisClusterNode[] {
     const raw = process.env.REDIS_CLUSTER_NODES;
     if (!raw) {
@@ -28,12 +42,30 @@ function parseClusterNodesFromEnv(): RedisClusterNode[] {
     }
     return raw.split(',').map((entry) => {
         const idx = entry.lastIndexOf(':');
-        return { host: entry.slice(0, idx), port: parseInt(entry.slice(idx + 1), 10) };
+        const host = idx === -1 ? '' : entry.slice(0, idx);
+        const port = idx === -1 ? NaN : parseInt(entry.slice(idx + 1), 10);
+        return { host, port };
     });
 }
 
+function assertValidClusterNodes(nodes: RedisClusterNode[]): void {
+    if (nodes.length === 0) {
+        throw new RedisConnectionError(
+            'REDIS_MODE=cluster requires at least one cluster node ' +
+                "(pass clusterNodes or set REDIS_CLUSTER_NODES='host:port[,host:port...]')"
+        );
+    }
+    for (const node of nodes) {
+        if (!node.host || !Number.isFinite(node.port)) {
+            throw new RedisConnectionError(
+                `Invalid cluster node '${node.host}:${node.port}' (expected 'host:port' with a numeric port)`
+            );
+        }
+    }
+}
+
 export function createRedis(options: RedisConnectionConfig = {}): Redis {
-    const mode: RedisMode = options.mode || (process.env.REDIS_MODE as RedisMode) || 'standalone';
+    const mode = resolveMode(options);
     const username = options.username || process.env.REDIS_USERNAME;
     const password = options.password || process.env.REDIS_PASSWORD;
 
@@ -49,6 +81,7 @@ export function createRedis(options: RedisConnectionConfig = {}): Redis {
             );
         }
         const clusterNodes = options.clusterNodes || parseClusterNodesFromEnv();
+        assertValidClusterNodes(clusterNodes);
         return new Cluster(clusterNodes, {
             redisOptions: { username, password },
         }) as unknown as Redis;

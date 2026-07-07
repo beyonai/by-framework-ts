@@ -134,4 +134,38 @@ describe('redis_client', () => {
             expect.any(Object)
         );
     });
+
+    test('rejects an unrecognized REDIS_MODE instead of silently falling back to standalone', async () => {
+        process.env.REDIS_MODE = 'sentinel';
+        const { createRedis } = await import('../src/redis_client');
+
+        expect(() => createRedis()).toThrow(/Invalid REDIS_MODE/);
+        expect(mockRedisConstructor).not.toHaveBeenCalled();
+        expect(mockClusterConstructor).not.toHaveBeenCalled();
+    });
+
+    test('rejects an unrecognized mode option the same way', async () => {
+        const { createRedis } = await import('../src/redis_client');
+
+        expect(() => createRedis({ mode: 'cluser' as any })).toThrow(/Invalid REDIS_MODE/);
+    });
+
+    test('mode=cluster with no cluster nodes configured fails fast instead of constructing an empty Cluster', async () => {
+        process.env.REDIS_MODE = 'cluster';
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+        const { createRedis } = await import('../src/redis_client');
+
+        expect(() => createRedis({ mode: 'cluster' })).toThrow(/at least one cluster node/);
+        expect(mockClusterConstructor).not.toHaveBeenCalled();
+    });
+
+    test('mode=cluster with a malformed REDIS_CLUSTER_NODES entry fails fast with an actionable error', async () => {
+        process.env.REDIS_MODE = 'cluster';
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+        process.env.REDIS_CLUSTER_NODES = 'h1:6379,not-a-host-port';
+        const { createRedis } = await import('../src/redis_client');
+
+        expect(() => createRedis({ mode: 'cluster' })).toThrow(/Invalid cluster node/);
+        expect(mockClusterConstructor).not.toHaveBeenCalled();
+    });
 });
