@@ -60,7 +60,7 @@ export class ServiceRegistry {
         );
 
         // 2. Add service name to global index
-        await this.redis.sadd(RegistryKeys.SD_SERVICES, serviceName);
+        await this.redis.sadd(RegistryKeys.sd_services(), serviceName);
 
         // 3. Send initial heartbeat and start heartbeat loop
         await this.sendHeartbeat();

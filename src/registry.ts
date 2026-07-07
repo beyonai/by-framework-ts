@@ -88,7 +88,7 @@ export class WorkerRegistry {
      * Use this when you want to register separately from heartbeat.
      */
     async registerWorkerMembership(workerId: string, agentTypes: string[]): Promise<void> {
-        await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
+        await this.redis.sadd(RegistryKeys.known_workers(), workerId);
         for (const agentType of agentTypes) {
             await this.redis.sadd(RegistryKeys.workerDeclaredAgentTypes(workerId), agentType);
             const denied = await this.isWorkerDeniedForType(agentType, workerId);
@@ -129,7 +129,7 @@ export class WorkerRegistry {
             await this.redis.set(key, encodeWorkerPresence(null, now, this.ipAddress), 'EX', leaseTtlSeconds);
         }
 
-        await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
+        await this.redis.sadd(RegistryKeys.known_workers(), workerId);
         return true;
     }
 
@@ -158,7 +158,7 @@ export class WorkerRegistry {
     async unregisterWorkerMembership(workerId: string): Promise<void> {
         const agentTypes = await this.redis.smembers(RegistryKeys.workerDeclaredAgentTypes(workerId));
         await this.redis.del(RegistryKeys.workerDeclaredAgentTypes(workerId));
-        await this.redis.srem(RegistryKeys.KNOWN_WORKERS, workerId);
+        await this.redis.srem(RegistryKeys.known_workers(), workerId);
         for (const agentType of agentTypes) {
             await this.redis.srem(RegistryKeys.agentTypeMembers(agentType), workerId);
         }
@@ -256,7 +256,7 @@ export class WorkerRegistry {
     }
 
     async getAllWorkers(): Promise<Record<string, any>> {
-        const workerIds = await this.redis.smembers(RegistryKeys.KNOWN_WORKERS);
+        const workerIds = await this.redis.smembers(RegistryKeys.known_workers());
         const result: Record<string, any> = {};
         for (const id of [...workerIds].sort()) {
             const data = await this.getWorker(id);
@@ -285,7 +285,7 @@ export class WorkerRegistry {
             throw new Error(`worker_id already in use: ${workerId}`);
         }
         this.lockTokens.set(workerId, token);
-        await this.redis.sadd(RegistryKeys.KNOWN_WORKERS, workerId);
+        await this.redis.sadd(RegistryKeys.known_workers(), workerId);
         return token;
     }
 
