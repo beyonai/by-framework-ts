@@ -6,6 +6,7 @@
  */
 import { Redis } from 'ioredis';
 import { RegistryKeys } from '../constants';
+import { clusterScanIter } from '../redis_cluster_scan';
 
 const REDIS_HISTORY_KEY = 'by_framework:obs:history';
 const REDIS_HISTORY_TTL_MS = 2 * 60 * 60 * 1000; // two hours of trend data
@@ -45,20 +46,14 @@ export async function loadHistoryFromRedis(redis: Redis, limit = 20): Promise<Hi
 
 async function scanOnlineWorkerIds(redis: Redis, limit = 300): Promise<string[]> {
     const pattern = RegistryKeys.worker_online_lease_scan_pattern();
-    const workerIds: string[] = [];
-    let cursor = '0';
-    do {
-        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-        cursor = nextCursor;
-        for (const key of keys) {
-            const workerId = RegistryKeys.worker_id_from_online_lease_key(key);
-            if (workerId !== null) {
-                workerIds.push(workerId);
-                if (limit && workerIds.length >= limit) return [...new Set(workerIds)].sort();
-            }
-        }
-    } while (cursor !== '0');
-    return [...new Set(workerIds)].sort();
+    const keys = await clusterScanIter(redis, pattern);
+    const workerIds = new Set<string>();
+    for (const key of keys) {
+        const workerId = RegistryKeys.worker_id_from_online_lease_key(key);
+        if (workerId !== null) workerIds.add(workerId);
+    }
+    const sorted = [...workerIds].sort();
+    return limit ? sorted.slice(0, limit) : sorted;
 }
 
 async function getQueueDepth(redis: Redis, agentType: string): Promise<number> {
