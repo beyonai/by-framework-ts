@@ -2,7 +2,7 @@ import { ActionType } from '../src/protocol/action_type';
 import { AgentState } from '../src/protocol/agent_state';
 import { EventType } from '../src/protocol/event_type';
 import { SseMessageType, SseReasonMessageType } from '../src/protocol/content_type';
-import { QueueNames, RegistryKeys, ConsumerGroups } from '../src/constants';
+import { QueueNames, RegistryKeys, ConsumerGroups, getKeySchemaVersion } from '../src/constants';
 import { MessageHeader } from '../src/protocol/message_header';
 import {
     AskAgentCommand,
@@ -95,6 +95,33 @@ describe('Protocol layer', () => {
     describe('Constants - ConsumerGroups', () => {
         test('AGENT_ENGINES is defined', () => {
             expect(ConsumerGroups.AGENT_ENGINES).toBeTruthy();
+        });
+    });
+
+    describe('Constants - getKeySchemaVersion', () => {
+        const originalValue = process.env.REDIS_KEY_SCHEMA_VERSION;
+
+        afterEach(() => {
+            if (originalValue === undefined) {
+                delete process.env.REDIS_KEY_SCHEMA_VERSION;
+            } else {
+                process.env.REDIS_KEY_SCHEMA_VERSION = originalValue;
+            }
+        });
+
+        test('defaults to v1 when REDIS_KEY_SCHEMA_VERSION is unset', () => {
+            delete process.env.REDIS_KEY_SCHEMA_VERSION;
+            expect(getKeySchemaVersion()).toBe('v1');
+        });
+
+        test('returns v2 when REDIS_KEY_SCHEMA_VERSION=v2', () => {
+            process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+            expect(getKeySchemaVersion()).toBe('v2');
+        });
+
+        test('throws for an invalid REDIS_KEY_SCHEMA_VERSION value', () => {
+            process.env.REDIS_KEY_SCHEMA_VERSION = 'v3';
+            expect(() => getKeySchemaVersion()).toThrow(/Invalid REDIS_KEY_SCHEMA_VERSION/);
         });
     });
 
