@@ -30,13 +30,14 @@ export async function clusterScanIter(redis: Redis, pattern: string, count = 100
     return [...new Set(perNodeKeys.flat())];
 }
 
-async function scanOneNode(node: Redis, pattern: string, count: number): Promise<string[]> {
-    const keys: string[] = [];
-    let cursor = '0';
-    do {
-        const [nextCursor, batch] = await node.scan(cursor, 'MATCH', pattern, 'COUNT', count);
-        cursor = nextCursor;
-        keys.push(...batch);
-    } while (cursor !== '0');
-    return keys;
+function scanOneNode(node: Redis, pattern: string, count: number): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+        const keys: string[] = [];
+        const stream = node.scanStream({ match: pattern, count });
+        stream.on('data', (batch: string[]) => {
+            keys.push(...batch);
+        });
+        stream.on('end', () => resolve(keys));
+        stream.on('error', reject);
+    });
 }
