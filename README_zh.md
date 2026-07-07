@@ -214,11 +214,13 @@ const results = await context.collectGroupResults(group.taskGroupId, 30);
 
 ```typescript
 createRedis(options?: {
+    mode?: 'standalone' | 'cluster';
     host?: string;
     port?: number;
     db?: number;
     username?: string;
     password?: string;
+    clusterNodes?: { host: string; port: number }[];
 })
 ```
 
@@ -226,11 +228,14 @@ createRedis(options?: {
 
 | 变量名 | 说明 |
 |--------|------|
+| `REDIS_MODE` | `standalone`（默认）或 `cluster` |
 | `REDIS_HOST` | Redis 主机，默认 `localhost` |
 | `REDIS_PORT` | Redis 端口，默认 `6379` |
-| `REDIS_DATABASE` | Redis DB，默认 `0` |
+| `REDIS_DB` | Redis DB，默认 `0` |
 | `REDIS_USERNAME` | Redis 用户名，可选 |
 | `REDIS_PASSWORD` | Redis 密码，可选 |
+| `REDIS_CLUSTER_NODES` | 逗号分隔的 `host:port` 列表，`mode=cluster` 时使用 |
+| `REDIS_KEY_SCHEMA_VERSION` | `v1`（默认，不带前缀的 key 格式）或 `v2`（hash-tag key 格式）；`mode=cluster` 要求为 `v2` |
 
 `runWorker` 还会读取：
 

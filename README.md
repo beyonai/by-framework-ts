@@ -214,11 +214,13 @@ const results = await context.collectGroupResults(group.taskGroupId, 30);
 
 ```typescript
 createRedis(options?: {
+    mode?: 'standalone' | 'cluster';
     host?: string;
     port?: number;
     db?: number;
     username?: string;
     password?: string;
+    clusterNodes?: { host: string; port: number }[];
 })
 ```
 
@@ -226,11 +228,14 @@ Default environment variables:
 
 | Variable | Description |
 |----------|-------------|
+| `REDIS_MODE` | `standalone` (default) or `cluster` |
 | `REDIS_HOST` | Redis host, default `localhost` |
 | `REDIS_PORT` | Redis port, default `6379` |
-| `REDIS_DATABASE` | Redis DB index, default `0` |
+| `REDIS_DB` | Redis DB index, default `0` |
 | `REDIS_USERNAME` | Redis username, optional |
 | `REDIS_PASSWORD` | Redis password, optional |
+| `REDIS_CLUSTER_NODES` | Comma-separated `host:port` list, used when `mode=cluster` |
+| `REDIS_KEY_SCHEMA_VERSION` | `v1` (default, unprefixed keys) or `v2` (hash-tagged keys); `mode=cluster` requires `v2` |
 
 `runWorker` also reads:
 

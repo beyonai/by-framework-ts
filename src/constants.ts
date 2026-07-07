@@ -6,6 +6,20 @@
  * in business code.
  */
 
+export type KeySchemaVersion = 'v1' | 'v2';
+
+/**
+ * Controlled by REDIS_KEY_SCHEMA_VERSION, defaulting to 'v1' (the current
+ * unprefixed key format). Cluster mode requires 'v2' (see redis_client.initRedis).
+ */
+export function getKeySchemaVersion(): KeySchemaVersion {
+  const version = process.env.REDIS_KEY_SCHEMA_VERSION || 'v1';
+  if (version !== 'v1' && version !== 'v2') {
+    throw new Error(`Invalid REDIS_KEY_SCHEMA_VERSION: '${version}' (must be 'v1' or 'v2')`);
+  }
+  return version;
+}
+
 export class QueueNames {
   /**
    * Control stream queue for dispatching tasks to workers with specific agent types.
