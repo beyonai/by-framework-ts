@@ -276,7 +276,10 @@ describe('WorkerRunner cancellation flow', () => {
         await runner.runControlOnce(1);
 
         expect(redis.xreadgroupCalls).toHaveLength(0);
-        expect(redis.duplicates[0].xreadgroupCalls).toHaveLength(1);
+        // Two-phase poll(): one non-blocking phase-one scan + one blocking phase-two
+        // read (a single declared agent_type -> phase one always comes back empty
+        // against this mock, so phase two always fires too).
+        expect(redis.duplicates[0].xreadgroupCalls).toHaveLength(2);
         expect(redis.duplicates[1].xreadgroupCalls).toHaveLength(1);
     });
 });

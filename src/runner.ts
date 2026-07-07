@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { getRedis, createRedis } from './redis_client';
 import { GatewayWorker } from './worker';
-import { QueueNames, ConsumerGroups } from './constants';
+import { QueueNames, ConsumerGroups, STREAM_READ_LAST_ID } from './constants';
 import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand, ResumeCommand, ResumeWorkerCommand, SuspendWorkerCommand, commandFromDict } from './protocol/commands';
 import { WorkerRegistry } from './registry';
 import { HistoryProvider } from './history';
@@ -53,6 +53,9 @@ export class WorkerRunner {
     // Consumer loop liveness tracking for health_check.
     private lastConsumerTick: number = 0;
     private readonly consumerHealthTimeoutMs: number = 30_000;
+    // Round-robin cursor for poll()'s phase-two blocking read, so no
+    // agent_type is permanently starved of the blocking slot.
+    private primaryCursor: number = 0;
 
     readonly spanRecorder: SpanRecorder;
 
@@ -279,34 +282,71 @@ export class WorkerRunner {
         await this.closeRedisConnection(this.redis, this.ownsRedis);
     }
 
+    /**
+     * Two-phase read to stay Cluster-safe: different agent_type ctrl streams
+     * are different entities/slots, so they can never be combined into one
+     * XREADGROUP call.
+     *
+     * Phase one: concurrent non-blocking XREADGROUP (no BLOCK argument at
+     * all — that means "return immediately with whatever's available", NOT
+     * the same as BLOCK 0, which blocks forever), one call per active
+     * stream. If any stream returned messages, return immediately.
+     *
+     * Phase two: only if every stream came back empty, one real blocking
+     * XREADGROUP against a single "primary" stream, chosen by round-robin
+     * across the declared agent_types so no agent_type is permanently
+     * starved of the blocking slot. Both phases reuse the existing
+     * streamReadRedis connection — no per-agent_type connection pool.
+     */
     async poll(options: { count?: number; block?: number } = {}): Promise<{ streamName: string; msgId: string; data: GatewayCommand }[]> {
-        const streams: string[] = [];
-        const ids: string[] = [];
+        const streamNames: string[] = [];
         for (const cap of this.worker.getAgentTypes()) {
             // Skip streams for denied agent types
             if (this.deniedAgentTypes.has(cap)) continue;
-            streams.push(QueueNames.ctrl_stream(cap));
-            ids.push('>');
+            streamNames.push(QueueNames.ctrl_stream(cap));
         }
 
-        if (streams.length === 0) return [];
+        if (streamNames.length === 0) return [];
 
-        const result = (await this.streamReadRedis.xreadgroup(
-            'GROUP',
-            this.groupName,
-            this.consumerName,
-            'COUNT',
-            options.count || this.fetchCount,
-            'BLOCK',
-            options.block || 2000,
-            'STREAMS',
-            ...streams,
-            ...ids
-        )) as [string, [string, string[]][]][] | null;
+        const count = options.count || this.fetchCount;
+        const block = options.block || 2000;
 
+        const firstPass = await Promise.all(
+            streamNames.map(streamName => this.readStream(streamName, count))
+        );
+        const firstResults = this.parseXreadgroupBatches(firstPass);
+        if (firstResults.length > 0) return firstResults;
+
+        const primary = streamNames[this.primaryCursor % streamNames.length];
+        this.primaryCursor++;
+        const blocked = await this.readStream(primary, count, block);
+        return this.parseXreadgroupBatches([blocked]);
+    }
+
+    private async readStream(
+        streamName: string,
+        count: number,
+        block?: number
+    ): Promise<[string, [string, string[]][]][] | null> {
+        const args: (string | number)[] = [
+            'GROUP', this.groupName, this.consumerName,
+            'COUNT', count,
+        ];
+        if (block !== undefined) {
+            args.push('BLOCK', block);
+        }
+        args.push('STREAMS', streamName, STREAM_READ_LAST_ID);
+        return (await (this.streamReadRedis.xreadgroup as (...a: any[]) => Promise<any>)(...args)) as
+            [string, [string, string[]][]][] | null;
+    }
+
+    private parseXreadgroupBatches(
+        batches: ([string, [string, string[]][]][] | null)[]
+    ): { streamName: string; msgId: string; data: GatewayCommand }[] {
         const results: { streamName: string; msgId: string; data: GatewayCommand }[] = [];
-        if (result) {
-            for (const [streamName, messages] of result) {
+        for (const batch of batches) {
+            if (!batch) continue;
+            for (const [streamName, messages] of batch) {
                 for (const [msgId, fieldValues] of messages) {
                     let dataStr = '';
                     for (let i = 0; i < fieldValues.length; i += 2) {
