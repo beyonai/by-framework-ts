@@ -195,8 +195,6 @@ export class RedisSpanExporter {
         const metaKey  = QueueNames.trace_meta(traceId);
         const spansKey = QueueNames.trace_spans(traceId);
 
-        const pipeline = this.redis.pipeline();
-
         // Read existing meta to compute true trace start
         let existingStartTs = 0;
         try {
@@ -208,6 +206,14 @@ export class RedisSpanExporter {
             ? Math.min(existingStartTs, startTs)
             : (existingStartTs || startTs);
         const updatedAt = Math.max(existingStartTs, endTs);
+
+        // trace_meta/trace_spans share a Cluster hash tag (trace_id) since
+        // Phase 2a, so this group stays atomic. The session/worker/agent_type
+        // indexes below are cross-entity relative to the trace group and are
+        // written as independent, best-effort calls instead (see
+        // writeTraceIndex) so a CROSSSLOT-prone shared pipeline can't cause
+        // the trace_meta/trace_spans write to lose its TTL on partial failure.
+        const pipeline = this.redis.pipeline();
 
         // Persist meta hash
         pipeline.hset(metaKey, 'trace_id', traceId);
@@ -231,24 +237,41 @@ export class RedisSpanExporter {
         pipeline.rpush(spansKey, JSON.stringify(payload));
         pipeline.expire(spansKey, this.ttlSeconds);
 
-        // Maintain sorted set indexes
+        await pipeline.exec();
+
+        // Maintain sorted set indexes independently — cross-entity relative
+        // to the trace group, so failure here must not affect the
+        // trace_meta/trace_spans write that already landed above.
         if (payload.session_id) {
-            const idx = QueueNames.trace_index_session(String(payload.session_id));
-            pipeline.zadd(idx, startTs, traceId);
-            pipeline.expire(idx, this.ttlSeconds);
+            await this.writeTraceIndex(
+                QueueNames.trace_index_session(String(payload.session_id)),
+                traceId,
+                startTs
+            );
         }
         if (payload.worker_id) {
-            const idx = QueueNames.trace_index_worker(String(payload.worker_id));
-            pipeline.zadd(idx, startTs, traceId);
-            pipeline.expire(idx, this.ttlSeconds);
+            await this.writeTraceIndex(
+                QueueNames.trace_index_worker(String(payload.worker_id)),
+                traceId,
+                startTs
+            );
         }
         if (payload.target_agent_type) {
-            const idx = QueueNames.trace_index_agent(String(payload.target_agent_type));
-            pipeline.zadd(idx, startTs, traceId);
-            pipeline.expire(idx, this.ttlSeconds);
+            await this.writeTraceIndex(
+                QueueNames.trace_index_agent(String(payload.target_agent_type)),
+                traceId,
+                startTs
+            );
         }
+    }
 
-        await pipeline.exec();
+    private async writeTraceIndex(indexKey: string, traceId: string, score: number): Promise<void> {
+        try {
+            await this.redis.zadd(indexKey, score, traceId);
+            await this.redis.expire(indexKey, this.ttlSeconds);
+        } catch (err) {
+            console.debug(`[RedisSpanExporter] trace index write failed for ${indexKey}:`, err);
+        }
     }
 }
 
