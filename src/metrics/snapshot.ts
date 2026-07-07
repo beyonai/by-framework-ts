@@ -44,16 +44,16 @@ export async function loadHistoryFromRedis(redis: Redis, limit = 20): Promise<Hi
 }
 
 async function scanOnlineWorkerIds(redis: Redis, limit = 300): Promise<string[]> {
-    const prefix = RegistryKeys.worker_online_lease('');
-    const pattern = `${prefix}*`;
+    const pattern = RegistryKeys.worker_online_lease_scan_pattern();
     const workerIds: string[] = [];
     let cursor = '0';
     do {
         const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
         cursor = nextCursor;
         for (const key of keys) {
-            if (key.startsWith(prefix)) {
-                workerIds.push(key.slice(prefix.length));
+            const workerId = RegistryKeys.worker_id_from_online_lease_key(key);
+            if (workerId !== null) {
+                workerIds.push(workerId);
                 if (limit && workerIds.length >= limit) return [...new Set(workerIds)].sort();
             }
         }
