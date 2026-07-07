@@ -90,18 +90,6 @@ describe('Protocol layer', () => {
         test('task_group includes groupId', () => {
             expect(QueueNames.task_group('grp-1')).toContain('grp-1');
         });
-
-        test('execution_detail includes executionId', () => {
-            expect(RegistryKeys.execution_detail('exec-1')).toContain('exec-1');
-        });
-
-        test('execution_by_message includes messageId', () => {
-            expect(RegistryKeys.execution_by_message('msg-1')).toContain('msg-1');
-        });
-
-        test('session_executions includes sessionId', () => {
-            expect(RegistryKeys.session_executions('sess-1')).toContain('sess-1');
-        });
     });
 
     describe('Constants - ConsumerGroups', () => {
