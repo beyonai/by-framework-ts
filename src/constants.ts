@@ -159,26 +159,6 @@ export class RegistryKeys {
     return `byai_gateway:session:${sessionId}:registry`;
   }
 
-  /**
-   * Execution details by execution ID.
-   */
-  static execution_detail(executionId: string): string {
-    return `byai_gateway:registry:execution:detail:${executionId}`;
-  }
-
-  /**
-   * Execution mapping by message ID.
-   */
-  static execution_by_message(messageId: string): string {
-    return `byai_gateway:registry:execution:message:${messageId}`;
-  }
-
-  /**
-   * Session executions set.
-   */
-  static session_executions(sessionId: string): string {
-    return `byai_gateway:registry:session:executions:${sessionId}`;
-  }
 }
 
 export class ConsumerGroups {
