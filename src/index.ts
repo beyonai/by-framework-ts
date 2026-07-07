@@ -11,6 +11,7 @@ export * from './protocol/message';
 export * from './protocol/content_type';
 
 export * from './redis_client';
+export * from './redis_cluster_scan';
 export * from './registry';
 export * from './client';
 export * from './context';
