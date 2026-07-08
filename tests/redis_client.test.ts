@@ -95,6 +95,28 @@ describe('redis_client', () => {
         );
     });
 
+    test('createRedis passes through standalone Redis options', async () => {
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis({
+            host: 'redis.example.com',
+            port: 6380,
+            keyPrefix: 'gateway:',
+            lazyConnect: true,
+            connectTimeout: 1500,
+        });
+
+        expect(mockRedisConstructor).toHaveBeenCalledWith(
+            expect.objectContaining({
+                host: 'redis.example.com',
+                port: 6380,
+                keyPrefix: 'gateway:',
+                lazyConnect: true,
+                connectTimeout: 1500,
+            })
+        );
+    });
+
     test('defaults to standalone mode and builds a standard Redis client', async () => {
         const { createRedis } = await import('../src/redis_client');
 
@@ -140,6 +162,33 @@ describe('redis_client', () => {
             expect.objectContaining({ redisOptions: expect.any(Object) })
         );
         expect(mockRedisConstructor).not.toHaveBeenCalled();
+    });
+
+    test('mode=cluster uses top-level Redis options as Cluster redisOptions', async () => {
+        process.env.REDIS_MODE = 'cluster';
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis({
+            mode: 'cluster',
+            clusterNodes: [{ host: 'node-a', port: 7001 }],
+            username: 'cluster-user',
+            password: 'cluster-pass',
+            connectTimeout: 2000,
+            tls: {},
+        });
+
+        expect(mockClusterConstructor).toHaveBeenCalledWith(
+            [{ host: 'node-a', port: 7001 }],
+            expect.objectContaining({
+                redisOptions: expect.objectContaining({
+                    username: 'cluster-user',
+                    password: 'cluster-pass',
+                    connectTimeout: 2000,
+                    tls: {},
+                }),
+            })
+        );
     });
 
     test('mode=cluster reads cluster_nodes from REDIS_CLUSTER_NODES env var', async () => {

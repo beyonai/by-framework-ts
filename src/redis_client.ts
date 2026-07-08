@@ -1,4 +1,4 @@
-import Redis, { Cluster } from 'ioredis';
+import Redis, { Cluster, RedisOptions } from 'ioredis';
 import { getKeySchemaVersion } from './constants';
 import { RedisConnectionError } from './exceptions';
 
@@ -11,13 +11,8 @@ export interface RedisClusterNode {
     port: number;
 }
 
-export interface RedisConnectionConfig {
+export interface RedisConnectionConfig extends RedisOptions {
     mode?: RedisMode;
-    host?: string;
-    port?: number;
-    db?: number;
-    username?: string;
-    password?: string;
     clusterNodes?: RedisClusterNode[];
 }
 
@@ -88,6 +83,7 @@ export function createRedis(options: RedisConnectionConfig = {}): Redis {
     const mode = resolveMode(options);
     const username = options.username || process.env.REDIS_USERNAME;
     const password = options.password || process.env.REDIS_PASSWORD;
+    const { mode: _mode, clusterNodes: _clusterNodes, ...redisOptions } = options;
 
     if (mode === 'cluster') {
         // Fail fast, synchronously, before any client is constructed: v1 keys
@@ -103,7 +99,11 @@ export function createRedis(options: RedisConnectionConfig = {}): Redis {
         const clusterNodes = options.clusterNodes || parseClusterNodesFromEnv();
         assertValidClusterNodes(clusterNodes);
         return new Cluster(clusterNodes, {
-            redisOptions: { username, password },
+            redisOptions: {
+                ...redisOptions,
+                username,
+                password,
+            },
         }) as unknown as Redis;
     }
 
@@ -112,6 +112,7 @@ export function createRedis(options: RedisConnectionConfig = {}): Redis {
     const db = options.db || resolveDbFromEnv();
 
     return new Redis({
+        ...redisOptions,
         host,
         port,
         db,
