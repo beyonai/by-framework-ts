@@ -31,6 +31,7 @@ describe('redis_client', () => {
         delete process.env.REDIS_MODE;
         delete process.env.REDIS_KEY_SCHEMA_VERSION;
         delete process.env.REDIS_CLUSTER_NODES;
+        delete process.env.REDIS_CLUSTER_HOST;
         delete process.env.REDIS_DB;
     });
 
@@ -133,6 +134,33 @@ describe('redis_client', () => {
             ],
             expect.any(Object)
         );
+    });
+
+    test('REDIS_CLUSTER_HOST alone (no REDIS_MODE) switches to cluster mode', async () => {
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+        process.env.REDIS_CLUSTER_HOST = '10.10.168.203:6371,10.10.168.203:6372';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis();
+
+        expect(mockClusterConstructor).toHaveBeenCalledWith(
+            [
+                { host: '10.10.168.203', port: 6371 },
+                { host: '10.10.168.203', port: 6372 },
+            ],
+            expect.any(Object)
+        );
+        expect(mockRedisConstructor).not.toHaveBeenCalled();
+    });
+
+    test('an explicit mode option still overrides REDIS_CLUSTER_HOST', async () => {
+        process.env.REDIS_CLUSTER_HOST = '10.10.168.203:6371';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis({ mode: 'standalone', host: 'redis.example.com', port: 6380 } as any);
+
+        expect(mockRedisConstructor).toHaveBeenCalled();
+        expect(mockClusterConstructor).not.toHaveBeenCalled();
     });
 
     test('rejects an unrecognized REDIS_MODE instead of silently falling back to standalone', async () => {

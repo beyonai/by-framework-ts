@@ -22,7 +22,14 @@ export interface RedisConnectionConfig {
 }
 
 function resolveMode(options: RedisConnectionConfig): RedisMode {
-    const raw = options.mode ?? (process.env.REDIS_MODE as RedisMode | undefined) ?? 'standalone';
+    // An explicit `mode` passed by the caller always wins. Otherwise,
+    // REDIS_CLUSTER_HOST is the preferred way to opt into Cluster mode: just
+    // setting it is enough, no separate REDIS_MODE=cluster required.
+    const raw =
+        options.mode ??
+        (process.env.REDIS_CLUSTER_HOST ? 'cluster' : undefined) ??
+        (process.env.REDIS_MODE as RedisMode | undefined) ??
+        'standalone';
     if (raw !== 'standalone' && raw !== 'cluster') {
         // A typo (e.g. 'cluser') or the reserved-but-unimplemented 'sentinel'
         // value must not silently fall through to standalone — that would
@@ -36,7 +43,7 @@ function resolveMode(options: RedisConnectionConfig): RedisMode {
 }
 
 function parseClusterNodesFromEnv(): RedisClusterNode[] {
-    const raw = process.env.REDIS_CLUSTER_NODES;
+    const raw = process.env.REDIS_CLUSTER_HOST || process.env.REDIS_CLUSTER_NODES;
     if (!raw) {
         return [];
     }
