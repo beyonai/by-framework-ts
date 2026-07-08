@@ -231,12 +231,12 @@ createRedis(options?: {
 | `REDIS_MODE` | `standalone`（默认）或 `cluster` |
 | `REDIS_HOST` | Redis 主机，默认 `localhost` |
 | `REDIS_PORT` | Redis 端口，默认 `6379` |
-| `REDIS_DB` | Redis DB，默认 `0` |
+| `REDIS_DATABASE` | Redis DB，默认 `0`（`REDIS_DB` 作为过期兼容 fallback 仍可用，会打印一条 warning 日志） |
 | `REDIS_USERNAME` | Redis 用户名，可选 |
 | `REDIS_PASSWORD` | Redis 密码，可选 |
-| `REDIS_CLUSTER_HOST` | 逗号分隔的 `host:port` 列表；只要配置了这个变量就会自动切换为集群模式，不需要再单独设置 `REDIS_MODE=cluster`（如果显式设置了 `REDIS_MODE`，仍以它为准） |
+| `REDIS_CLUSTER_HOST` | 逗号分隔的 `host:port` 列表；只要配置了这个变量就会自动切换为集群模式并推断 key schema 为 `v2`，不需要再单独设置 `REDIS_MODE=cluster`/`REDIS_KEY_SCHEMA_VERSION=v2`（如果显式设置了对应变量，仍以显式值为准） |
 | `REDIS_CLUSTER_NODES` | 逗号分隔的 `host:port` 列表，`mode=cluster` 且未设置 `REDIS_CLUSTER_HOST` 时使用 |
-| `REDIS_KEY_SCHEMA_VERSION` | `v1`（默认，不带前缀的 key 格式）或 `v2`（hash-tag key 格式）；`mode=cluster` 要求为 `v2` |
+| `REDIS_KEY_SCHEMA_VERSION` | `v1`（默认，不带前缀的 key 格式）或 `v2`（hash-tag key 格式）；`cluster` 模式要求为 `v2`。未显式设置时，只要配置了 `REDIS_CLUSTER_HOST` 就会自动推断为 `v2` |
 
 `runWorker` 还会读取：
 

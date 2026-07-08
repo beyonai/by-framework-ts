@@ -231,12 +231,12 @@ Default environment variables:
 | `REDIS_MODE` | `standalone` (default) or `cluster` |
 | `REDIS_HOST` | Redis host, default `localhost` |
 | `REDIS_PORT` | Redis port, default `6379` |
-| `REDIS_DB` | Redis DB index, default `0` |
+| `REDIS_DATABASE` | Redis DB index, default `0` (`REDIS_DB` still works as a deprecated fallback, logs a warning) |
 | `REDIS_USERNAME` | Redis username, optional |
 | `REDIS_PASSWORD` | Redis password, optional |
-| `REDIS_CLUSTER_HOST` | Comma-separated `host:port` list; setting it alone is enough to switch to cluster mode, no separate `REDIS_MODE=cluster` needed (an explicit `REDIS_MODE` still wins if set) |
+| `REDIS_CLUSTER_HOST` | Comma-separated `host:port` list; setting it alone is enough to switch to cluster mode and key schema `v2`, no separate `REDIS_MODE=cluster`/`REDIS_KEY_SCHEMA_VERSION=v2` needed (explicit values still win if set) |
 | `REDIS_CLUSTER_NODES` | Comma-separated `host:port` list, used when `mode=cluster` and `REDIS_CLUSTER_HOST` isn't set |
-| `REDIS_KEY_SCHEMA_VERSION` | `v1` (default, unprefixed keys) or `v2` (hash-tagged keys); `mode=cluster` requires `v2` |
+| `REDIS_KEY_SCHEMA_VERSION` | `v1` (default) or `v2` (hash-tagged keys); required for `cluster` mode. If unset, automatically inferred as `v2` when `REDIS_CLUSTER_HOST` is set |
 
 `runWorker` also reads:
 

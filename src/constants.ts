@@ -9,11 +9,20 @@
 export type KeySchemaVersion = 'v1' | 'v2';
 
 /**
- * Controlled by REDIS_KEY_SCHEMA_VERSION, defaulting to 'v1' (the current
- * unprefixed key format). Cluster mode requires 'v2' (see redis_client.initRedis).
+ * Controlled by REDIS_KEY_SCHEMA_VERSION, which always wins when set
+ * explicitly. When it isn't set, REDIS_CLUSTER_HOST being configured
+ * implies 'v2' (Cluster mode requires v2 - v1 keys have no hash tags and
+ * hit CROSSSLOT errors under Cluster; see redis_client.createRedis's
+ * fail-fast check); otherwise it defaults to 'v1' (the legacy unprefixed
+ * key format). This mirrors redis_client.ts's REDIS_MODE/REDIS_CLUSTER_HOST
+ * precedence, but deliberately does NOT infer 'v2' from an explicit
+ * REDIS_MODE=cluster alone (without REDIS_CLUSTER_HOST) - that legacy
+ * explicit-mode path still requires REDIS_KEY_SCHEMA_VERSION=v2 to be set
+ * by hand.
  */
 export function getKeySchemaVersion(): KeySchemaVersion {
-  const version = process.env.REDIS_KEY_SCHEMA_VERSION || 'v1';
+  const version =
+    process.env.REDIS_KEY_SCHEMA_VERSION || (process.env.REDIS_CLUSTER_HOST ? 'v2' : 'v1');
   if (version !== 'v1' && version !== 'v2') {
     throw new Error(`Invalid REDIS_KEY_SCHEMA_VERSION: '${version}' (must be 'v1' or 'v2')`);
   }

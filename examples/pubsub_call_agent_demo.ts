@@ -193,8 +193,14 @@ async function main() {
             // ── Step 4：子 agent 的输出块将自动流入同一 data stream ─────────────
             // 读取 data stream 的示例（可选，用于日志或二次加工）：
             //
-            //   const streamKey = `byai_gateway:session:${sessionId}:data_stream`;
+            //   const streamKey = QueueNames.session_data_stream(sessionId);
             //   const events = await redis.xread('COUNT', 50, 'STREAMS', streamKey, '$');
+            //
+            // 注意：一定要用 QueueNames.session_data_stream(sessionId) 而不是手写
+            // `byai_gateway:session:${sessionId}:data_stream` 这类字面量 —— 手写的是
+            // v1 格式，REDIS_KEY_SCHEMA_VERSION=v2（Cluster 模式要求）下 SDK 实际写入的
+            // 是带 byai_gateway:v2: 前缀和 hash tag 的 key，字面量会读到一个空 stream
+            // 且不报错，非常难排查。
             //
             // 本演示不阻塞等待，子 agent 异步完成后客户端自然收到其输出块。
 
