@@ -32,6 +32,7 @@ describe('redis_client', () => {
         delete process.env.REDIS_KEY_SCHEMA_VERSION;
         delete process.env.REDIS_CLUSTER_NODES;
         delete process.env.REDIS_CLUSTER_HOST;
+        delete process.env.REDIS_DATABASE;
         delete process.env.REDIS_DB;
     });
 
@@ -60,14 +61,37 @@ describe('redis_client', () => {
         });
     });
 
-    test('createRedis reads db from REDIS_DB env var', async () => {
-        process.env.REDIS_DB = '3';
+    test('createRedis reads db from REDIS_DATABASE env var', async () => {
+        process.env.REDIS_DATABASE = '3';
         const { createRedis } = await import('../src/redis_client');
 
         createRedis({ host: 'redis.example.com', port: 6380 } as any);
 
         expect(mockRedisConstructor).toHaveBeenCalledWith(
             expect.objectContaining({ db: 3 })
+        );
+    });
+
+    test('createRedis falls back to deprecated REDIS_DB when REDIS_DATABASE is unset', async () => {
+        process.env.REDIS_DB = '5';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis({ host: 'redis.example.com', port: 6380 } as any);
+
+        expect(mockRedisConstructor).toHaveBeenCalledWith(
+            expect.objectContaining({ db: 5 })
+        );
+    });
+
+    test('createRedis prefers REDIS_DATABASE over deprecated REDIS_DB when both are set', async () => {
+        process.env.REDIS_DATABASE = '2';
+        process.env.REDIS_DB = '9';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis({ host: 'redis.example.com', port: 6380 } as any);
+
+        expect(mockRedisConstructor).toHaveBeenCalledWith(
+            expect.objectContaining({ db: 2 })
         );
     });
 
@@ -138,6 +162,25 @@ describe('redis_client', () => {
 
     test('REDIS_CLUSTER_HOST alone (no REDIS_MODE) switches to cluster mode', async () => {
         process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+        process.env.REDIS_CLUSTER_HOST = '10.10.168.203:6371,10.10.168.203:6372';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis();
+
+        expect(mockClusterConstructor).toHaveBeenCalledWith(
+            [
+                { host: '10.10.168.203', port: 6371 },
+                { host: '10.10.168.203', port: 6372 },
+            ],
+            expect.any(Object)
+        );
+        expect(mockRedisConstructor).not.toHaveBeenCalled();
+    });
+
+    test('REDIS_CLUSTER_HOST alone (no REDIS_KEY_SCHEMA_VERSION either) builds a Cluster client without failing fast', async () => {
+        // getKeySchemaVersion() now infers 'v2' automatically from
+        // REDIS_CLUSTER_HOST, so this no longer needs REDIS_KEY_SCHEMA_VERSION
+        // set explicitly to avoid the fail-fast check.
         process.env.REDIS_CLUSTER_HOST = '10.10.168.203:6371,10.10.168.203:6372';
         const { createRedis } = await import('../src/redis_client');
 

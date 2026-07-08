@@ -1,4 +1,4 @@
-import { QueueNames, RegistryKeys } from '../src/constants';
+import { QueueNames, RegistryKeys, getKeySchemaVersion } from '../src/constants';
 
 /**
  * Redis Cluster CRC16 (XMODEM variant) + hash-tag slot resolution, matching
@@ -257,5 +257,53 @@ describe('constants v1/v2 key schema', () => {
             const key = RegistryKeys.worker_online_lease('worker-07');
             expect(RegistryKeys.worker_id_from_online_lease_key(key)).toBe('worker-07');
         });
+    });
+});
+
+describe('getKeySchemaVersion', () => {
+    const originalSchemaVersion = process.env.REDIS_KEY_SCHEMA_VERSION;
+    const originalClusterHost = process.env.REDIS_CLUSTER_HOST;
+
+    afterEach(() => {
+        if (originalSchemaVersion === undefined) {
+            delete process.env.REDIS_KEY_SCHEMA_VERSION;
+        } else {
+            process.env.REDIS_KEY_SCHEMA_VERSION = originalSchemaVersion;
+        }
+        if (originalClusterHost === undefined) {
+            delete process.env.REDIS_CLUSTER_HOST;
+        } else {
+            process.env.REDIS_CLUSTER_HOST = originalClusterHost;
+        }
+    });
+
+    test('defaults to v1 when unset', () => {
+        delete process.env.REDIS_KEY_SCHEMA_VERSION;
+        delete process.env.REDIS_CLUSTER_HOST;
+        expect(getKeySchemaVersion()).toBe('v1');
+    });
+
+    test('accepts an explicit v2 value', () => {
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+        expect(getKeySchemaVersion()).toBe('v2');
+    });
+
+    test('rejects an invalid value', () => {
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v3';
+        expect(() => getKeySchemaVersion()).toThrow(/Invalid REDIS_KEY_SCHEMA_VERSION/);
+    });
+
+    test('REDIS_CLUSTER_HOST alone (no explicit schema version) implies v2', () => {
+        delete process.env.REDIS_KEY_SCHEMA_VERSION;
+        process.env.REDIS_CLUSTER_HOST = 'h1:6379,h2:6380';
+        expect(getKeySchemaVersion()).toBe('v2');
+    });
+
+    test('an explicit value wins over REDIS_CLUSTER_HOST', () => {
+        // redis_client.ts's createRedis() fail-fast check is what catches
+        // this contradictory combination, not silent auto-correction here.
+        process.env.REDIS_CLUSTER_HOST = 'h1:6379';
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v1';
+        expect(getKeySchemaVersion()).toBe('v1');
     });
 });

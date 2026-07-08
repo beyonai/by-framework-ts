@@ -55,6 +55,19 @@ function parseClusterNodesFromEnv(): RedisClusterNode[] {
     });
 }
 
+function resolveDbFromEnv(): number {
+    // REDIS_DATABASE replaces REDIS_DB (which still works as a deprecated
+    // fallback, logging a warning, during the transition period).
+    let raw = process.env.REDIS_DATABASE;
+    if (raw === undefined) {
+        raw = process.env.REDIS_DB;
+        if (raw !== undefined) {
+            console.warn('REDIS_DB is deprecated, use REDIS_DATABASE instead');
+        }
+    }
+    return parseInt(raw || '0', 10);
+}
+
 function assertValidClusterNodes(nodes: RedisClusterNode[]): void {
     if (nodes.length === 0) {
         throw new RedisConnectionError(
@@ -96,7 +109,7 @@ export function createRedis(options: RedisConnectionConfig = {}): Redis {
 
     const host = options.host || process.env.REDIS_HOST || 'localhost';
     const port = options.port || parseInt(process.env.REDIS_PORT || '6379', 10);
-    const db = options.db || parseInt(process.env.REDIS_DB || '0', 10);
+    const db = options.db || resolveDbFromEnv();
 
     return new Redis({
         host,
