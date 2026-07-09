@@ -2,7 +2,7 @@ import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { getRedis } from './redis_client';
 import { WorkerRegistry } from './registry';
-import { CancelTaskResponse, ExecutionStatus, SendMessageResponse } from './protocol/responses';
+import { CancelSessionResponse, CancelTaskResponse, ExecutionStatus, SendMessageResponse } from './protocol/responses';
 import { ActionType } from './protocol/action_type';
 import { AskAgentCommand, BaseCommand, CancelTaskCommand, ResumeCommand } from './protocol/commands';
 import { MessageHeader } from './protocol/message_header';
@@ -440,6 +440,80 @@ export class GatewayClient {
             status: ExecutionStatus.CANCEL_REQUESTED,
             timestamp: Date.now(),
             cancelled_count: cancelledCount,
+        };
+    }
+
+    async cancelSession(params: {
+        sessionId: string;
+        reason?: string;
+        targetAgentType?: string;
+        requestedBy?: string;
+        cancelMode?: 'graceful' | 'force';
+    }): Promise<CancelSessionResponse> {
+        const TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
+        const reason = params.reason || '';
+
+        const allExecutions = await this.registry.getAllSessionExecutions(params.sessionId);
+
+        if (allExecutions.length === 0) {
+            return {
+                success: false,
+                session_id: params.sessionId,
+                status: ExecutionStatus.NOT_FOUND,
+                timestamp: Date.now(),
+                cancelled_count: 0,
+                already_finished_count: 0,
+            };
+        }
+
+        const toCancel = allExecutions.filter(exec => !TERMINAL_STATES.has(String(exec.status || '')));
+        const terminalExecutions = allExecutions.filter(exec => TERMINAL_STATES.has(String(exec.status || '')));
+
+        for (const exec of terminalExecutions) {
+            await this.registry.markCancelRequested(String(exec.execution_id), params.sessionId, reason);
+        }
+
+        if (toCancel.length === 0) {
+            return {
+                success: false,
+                session_id: params.sessionId,
+                status: ExecutionStatus.ALREADY_FINISHED,
+                timestamp: Date.now(),
+                cancelled_count: 0,
+                already_finished_count: terminalExecutions.length,
+            };
+        }
+
+        for (const exec of toCancel) {
+            const executionId = String(exec.execution_id);
+            const workerId = String(exec.worker_id || '');
+
+            await this.registry.markExecutionCancelling(executionId, params.sessionId, reason);
+
+            if (workerId) {
+                const cancelCommand = new CancelTaskCommand(
+                    new MessageHeader(`msg-cancel-${uuidv4().slice(0, 8)}`, params.sessionId, uuidv4().replace(/-/g, ''), {
+                        targetAgentType: params.targetAgentType || exec.target_agent_type || '',
+                        parentMessageId: exec.message_id,
+                    }),
+                    exec.message_id,
+                    executionId,
+                    workerId,
+                    reason,
+                    params.requestedBy || 'client',
+                    params.cancelMode || 'graceful'
+                );
+                await this.sendCommand(cancelCommand, QueueNames.worker_ctrl_stream(workerId));
+            }
+        }
+
+        return {
+            success: true,
+            session_id: params.sessionId,
+            status: ExecutionStatus.CANCEL_REQUESTED,
+            timestamp: Date.now(),
+            cancelled_count: toCancel.length,
+            already_finished_count: terminalExecutions.length,
         };
     }
 

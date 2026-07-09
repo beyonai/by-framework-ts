@@ -405,5 +405,171 @@ describe('GatewayClient', () => {
             expect(mockRegistry.markExecutionCancelling).toHaveBeenCalledWith('exec-queued', 'sess-1', 'user aborted');
             expect(mockRedis.xadd).not.toHaveBeenCalled();
         });
+
+        it('should cancel every non-terminal execution in a session via cancelSession', async () => {
+            const mockRegistry = (client as any).registry;
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([
+                {
+                    execution_id: 'exec-a',
+                    message_id: 'msg-a',
+                    worker_id: 'worker-1',
+                    session_id: 'sess-1',
+                    target_agent_type: 'agent-a',
+                    status: 'RUNNING',
+                },
+                {
+                    execution_id: 'exec-b',
+                    message_id: 'msg-b',
+                    worker_id: 'worker-2',
+                    session_id: 'sess-1',
+                    target_agent_type: 'agent-b',
+                    status: 'QUEUED',
+                },
+            ]);
+
+            const response = await client.cancelSession({
+                sessionId: 'sess-1',
+                reason: 'user abort',
+            });
+
+            expect(response.success).toBe(true);
+            expect(response.status).toBe('CANCEL_REQUESTED');
+            expect(response.cancelled_count).toBe(2);
+            expect(response.already_finished_count).toBe(0);
+
+            expect(mockRegistry.markExecutionCancelling).toHaveBeenCalledWith('exec-a', 'sess-1', 'user abort');
+            expect(mockRegistry.markExecutionCancelling).toHaveBeenCalledWith('exec-b', 'sess-1', 'user abort');
+
+            expect(mockRedis.xadd).toHaveBeenCalledTimes(2);
+            const targetStreams = mockRedis.xadd.mock.calls.map((call: any[]) => call[0]);
+            expect(targetStreams).toContain('byai_gateway:ctrl:worker:worker-1');
+            expect(targetStreams).toContain('byai_gateway:ctrl:worker:worker-2');
+        });
+
+        it('should flag terminal executions without re-cancelling them in cancelSession', async () => {
+            const mockRegistry = (client as any).registry;
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([
+                {
+                    execution_id: 'exec-a',
+                    message_id: 'msg-a',
+                    worker_id: 'worker-1',
+                    session_id: 'sess-1',
+                    target_agent_type: 'agent-a',
+                    status: 'COMPLETED',
+                },
+                {
+                    execution_id: 'exec-b',
+                    message_id: 'msg-b',
+                    worker_id: 'worker-2',
+                    session_id: 'sess-1',
+                    target_agent_type: 'agent-b',
+                    status: 'RUNNING',
+                },
+            ]);
+
+            const response = await client.cancelSession({
+                sessionId: 'sess-1',
+                reason: 'user abort',
+            });
+
+            expect(response.success).toBe(true);
+            expect(response.status).toBe('CANCEL_REQUESTED');
+            expect(response.cancelled_count).toBe(1);
+            expect(response.already_finished_count).toBe(1);
+
+            expect(mockRegistry.markExecutionCancelling).toHaveBeenCalledTimes(1);
+            expect(mockRegistry.markExecutionCancelling).toHaveBeenCalledWith('exec-b', 'sess-1', 'user abort');
+            expect(mockRegistry.markCancelRequested).toHaveBeenCalledWith('exec-a', 'sess-1', 'user abort');
+
+            expect(mockRedis.xadd).toHaveBeenCalledTimes(1);
+            expect(mockRedis.xadd.mock.calls[0][0]).toBe('byai_gateway:ctrl:worker:worker-2');
+        });
+
+        it('should return ALREADY_FINISHED from cancelSession when every execution is terminal', async () => {
+            const mockRegistry = (client as any).registry;
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([
+                {
+                    execution_id: 'exec-a',
+                    message_id: 'msg-a',
+                    worker_id: 'worker-1',
+                    session_id: 'sess-1',
+                    status: 'COMPLETED',
+                },
+                {
+                    execution_id: 'exec-b',
+                    message_id: 'msg-b',
+                    worker_id: 'worker-2',
+                    session_id: 'sess-1',
+                    status: 'FAILED',
+                },
+            ]);
+
+            const response = await client.cancelSession({ sessionId: 'sess-1', reason: 'user abort' });
+
+            expect(response.success).toBe(false);
+            expect(response.status).toBe('ALREADY_FINISHED');
+            expect(response.cancelled_count).toBe(0);
+            expect(response.already_finished_count).toBe(2);
+
+            expect(mockRegistry.markExecutionCancelling).not.toHaveBeenCalled();
+            expect(mockRegistry.markCancelRequested).toHaveBeenCalledTimes(2);
+            expect(mockRedis.xadd).not.toHaveBeenCalled();
+        });
+
+        it('should return NOT_FOUND from cancelSession for an empty session', async () => {
+            const mockRegistry = (client as any).registry;
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([]);
+
+            const response = await client.cancelSession({ sessionId: 'sess-unknown' });
+
+            expect(response.success).toBe(false);
+            expect(response.status).toBe('NOT_FOUND');
+            expect(response.cancelled_count).toBe(0);
+            expect(response.already_finished_count).toBe(0);
+            expect(mockRegistry.markExecutionCancelling).not.toHaveBeenCalled();
+            expect(mockRegistry.markCancelRequested).not.toHaveBeenCalled();
+            expect(mockRedis.xadd).not.toHaveBeenCalled();
+        });
+
+        it('should mark unclaimed queued executions cancelling without dispatching in cancelSession', async () => {
+            const mockRegistry = (client as any).registry;
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([{
+                execution_id: 'exec-queued',
+                message_id: 'msg-queued',
+                worker_id: '',
+                session_id: 'sess-1',
+                status: 'QUEUED',
+            }]);
+
+            const response = await client.cancelSession({ sessionId: 'sess-1', reason: 'user abort' });
+
+            expect(response.success).toBe(true);
+            expect(response.status).toBe('CANCEL_REQUESTED');
+            expect(response.cancelled_count).toBe(1);
+            expect(mockRegistry.markExecutionCancelling).toHaveBeenCalledWith('exec-queued', 'sess-1', 'user abort');
+            expect(mockRedis.xadd).not.toHaveBeenCalled();
+        });
+
+        it('should inherit cancelSession unmodified on ByaiGatewayClient', async () => {
+            const { ByaiGatewayClient } = require('../src/byai_client');
+            const byaiClient = new ByaiGatewayClient();
+            (byaiClient as any).redis = mockRedis;
+            const mockRegistry = (byaiClient as any).registry;
+            mockRegistry.getAllSessionExecutions.mockResolvedValue([{
+                execution_id: 'exec-a',
+                message_id: 'msg-a',
+                worker_id: 'worker-1',
+                session_id: 'sess-1',
+                status: 'RUNNING',
+            }]);
+
+            const response = await byaiClient.cancelSession({ sessionId: 'sess-1', reason: 'user abort' });
+
+            expect(response.success).toBe(true);
+            expect(response.status).toBe('CANCEL_REQUESTED');
+            expect(response.cancelled_count).toBe(1);
+            expect(mockRegistry.markExecutionCancelling).toHaveBeenCalledWith('exec-a', 'sess-1', 'user abort');
+            expect(mockRedis.xadd).toHaveBeenCalledTimes(1);
+        });
     });
 });

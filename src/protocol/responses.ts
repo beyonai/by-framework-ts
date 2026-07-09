@@ -27,6 +27,16 @@ export interface CancelTaskResponse {
     cancelled_count?: number;
 }
 
+export interface CancelSessionResponse {
+    success: boolean;
+    session_id: string;
+    status: string;
+    timestamp: number;
+    error?: string;
+    cancelled_count?: number;
+    already_finished_count?: number;
+}
+
 /**
  * API response status values for execution operations.
  */
