@@ -245,6 +245,34 @@ describe('redis_client', () => {
         expect(mockRedisConstructor).not.toHaveBeenCalled();
     });
 
+    test('empty REDIS_CLUSTER_HOST is treated as unset, falling back to standalone', async () => {
+        process.env.REDIS_CLUSTER_HOST = '';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis();
+
+        expect(mockRedisConstructor).toHaveBeenCalled();
+        expect(mockClusterConstructor).not.toHaveBeenCalled();
+    });
+
+    test('empty REDIS_CLUSTER_HOST falls back to REDIS_CLUSTER_NODES', async () => {
+        process.env.REDIS_MODE = 'cluster';
+        process.env.REDIS_KEY_SCHEMA_VERSION = 'v2';
+        process.env.REDIS_CLUSTER_HOST = '';
+        process.env.REDIS_CLUSTER_NODES = 'h1:6379,h2:6380';
+        const { createRedis } = await import('../src/redis_client');
+
+        createRedis({ mode: 'cluster' });
+
+        expect(mockClusterConstructor).toHaveBeenCalledWith(
+            [
+                { host: 'h1', port: 6379 },
+                { host: 'h2', port: 6380 },
+            ],
+            expect.any(Object)
+        );
+    });
+
     test('an explicit mode option still overrides REDIS_CLUSTER_HOST', async () => {
         process.env.REDIS_CLUSTER_HOST = '10.10.168.203:6371';
         const { createRedis } = await import('../src/redis_client');
