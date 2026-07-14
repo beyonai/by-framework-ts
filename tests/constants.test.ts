@@ -306,4 +306,10 @@ describe('getKeySchemaVersion', () => {
         process.env.REDIS_KEY_SCHEMA_VERSION = 'v1';
         expect(getKeySchemaVersion()).toBe('v1');
     });
+
+    test('empty REDIS_CLUSTER_HOST is treated as unset, defaults to v1', () => {
+        delete process.env.REDIS_KEY_SCHEMA_VERSION;
+        process.env.REDIS_CLUSTER_HOST = '';
+        expect(getKeySchemaVersion()).toBe('v1');
+    });
 });
