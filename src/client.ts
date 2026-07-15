@@ -8,7 +8,9 @@ import { AskAgentCommand, BaseCommand, CancelTaskCommand, ResumeCommand } from '
 import { MessageHeader } from './protocol/message_header';
 import { QueueNames } from './constants';
 import { initializeQueuedExecution } from './dispatch/execution_init';
+import { AvailabilityRouter, AvailabilityStatus, RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
 import { publishAskAgentCommand } from './dispatch/publish_ask_agent';
+import { retargetAskAgentCommand } from './dispatch/ask_agent_build';
 import { BaiYingMessage } from './protocol/message';
 import { GatewayInterceptor } from './interceptors';
 import { SpanRecorder, spanIdHex } from './trace/span_recorder';
@@ -37,7 +39,7 @@ interface RouteResolution {
     targetWorkerId: string;
 }
 
-interface SendMessageParams {
+export interface SendMessageParams {
     readonly targetAgentType: string;
     readonly sessionId: string;
     readonly content: string | BaiYingMessage | ReadonlyArray<BaiYingMessage>;
@@ -52,6 +54,10 @@ interface SendMessageParams {
     readonly metadata?: Readonly<Record<string, unknown>>;
     readonly targetWorkerId?: string;
     readonly requireOnlineWorker?: boolean;
+    readonly routePolicy?: RoutePolicyType;
+    readonly availabilityTimeoutMs?: number;
+    readonly region?: string;
+    readonly priority?: number;
 }
 
 export class GatewayClient {
@@ -573,7 +579,7 @@ export class GatewayClient {
             if (params.targetWorkerId) {
                 route = await this.resolveDirectWorkerRoute(params.targetWorkerId, requireOnline);
             } else {
-                route = await this.resolveAgentTypeRoute(params.targetAgentType, requireOnline);
+                route = { streamName: QueueNames.ctrl_stream(params.targetAgentType), targetWorkerId: '' };
             }
         } catch (err) {
             const error = err instanceof Error ? err.message : String(err);
@@ -650,25 +656,53 @@ export class GatewayClient {
             attachments: (payload as { attachments?: unknown[] })?.attachments || []
         };
 
-        const command = this.buildGatewayCommand(
+        let command = this.buildGatewayCommand(
             requestParams.actionType || ActionType.ASK_AGENT,
             header,
             formattedContent,
             mergedPayload
         );
 
-        const dispatchStartedAt = Date.now();
-        if (command instanceof AskAgentCommand) {
-            await publishAskAgentCommand({
-                redis: this.redis,
-                registry: this.registry,
-                command,
-                streamName: route.streamName,
-                executionSourceAgentFallback: 'client',
+        const routePolicy = params.routePolicy ?? (requireOnline ? RoutePolicy.FAIL_FAST : RoutePolicy.SEND_ANYWAY);
+        const executionId = `exec-${uuidv4().slice(0, 8)}`;
+        let routeStatus = params.targetWorkerId ? 'DIRECT_WORKER' : AvailabilityStatus.DELIVER_NOW;
+        if (!params.targetWorkerId) {
+            const availability = await new AvailabilityRouter(this.redis, this.registry).prepareDelivery({
+                executionId, messageId, sessionId: requestParams.sessionId, traceId,
+                source: params.sourceAgentType || 'client', targetAgentType: requestParams.targetAgentType,
+                userCode: requestParams.userCode, region: params.region, priority: params.priority,
+                policy: routePolicy, timeoutMs: params.availabilityTimeoutMs,
+                commandPayload: command.toDict() as Record<string, unknown>, metadata,
             });
-        } else {
+            routeStatus = availability.status;
+            if (availability.status === AvailabilityStatus.REJECT) {
+                const error = availability.error || 'Agent type unavailable';
+                await initializeQueuedExecution(this.registry, {
+                    execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
+                    trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
+                    source_agent_type: params.sourceAgentType || 'client', target_agent_type: requestParams.targetAgentType,
+                    stream_name: '', worker_id: '', status: 'FAILED', route_policy: routePolicy,
+                    route_status: availability.status, availability_error: error,
+                    availability_error_code: availability.errorCode || ExecutionStatus.ERR_AGENT_TYPE_UNAVAILABLE,
+                }).catch(() => undefined);
+                this.endLangfuseClientDispatchObservation(langfuseClientDispatch, { success: false, error }, error);
+                return {
+                    success: false, status: ExecutionStatus.FAILED, message_id: messageId, trace_id: traceId,
+                    target_worker_id: '', timestamp: Date.now(), error,
+                    error_code: availability.errorCode || ExecutionStatus.ERR_AGENT_TYPE_UNAVAILABLE,
+                };
+            }
+            route.streamName = availability.streamName || route.streamName;
+            if (availability.selectedAgentType && command instanceof AskAgentCommand) {
+                command = retargetAskAgentCommand(command, availability.selectedAgentType);
+                requestParams.targetAgentType = availability.selectedAgentType;
+            }
+        }
+
+        const dispatchStartedAt = Date.now();
+        if (routeStatus === AvailabilityStatus.QUEUE_PENDING) {
             await initializeQueuedExecution(this.registry, {
-                execution_id: `exec-${uuidv4().slice(0, 8)}`,
+                execution_id: executionId,
                 message_id: messageId,
                 session_id: requestParams.sessionId,
                 trace_id: traceId,
@@ -680,6 +714,25 @@ export class GatewayClient {
                 status: 'QUEUED',
                 cancel_requested: false,
                 cancel_reason: '',
+                route_policy: routePolicy,
+                route_status: routeStatus,
+            }).catch(() => undefined);
+        } else if (command instanceof AskAgentCommand) {
+            await initializeQueuedExecution(this.registry, {
+                execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
+                trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
+                source_agent_type: params.sourceAgentType || 'client', target_agent_type: requestParams.targetAgentType,
+                stream_name: route.streamName, worker_id: '', status: 'QUEUED', cancel_requested: false,
+                cancel_reason: '', route_policy: routePolicy, route_status: routeStatus,
+            }).catch(() => undefined);
+            await this.redis.xadd(route.streamName, '*', 'data', JSON.stringify(command.toDict()));
+        } else {
+            await initializeQueuedExecution(this.registry, {
+                execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
+                trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
+                source_agent_type: params.sourceAgentType || 'client', target_agent_type: requestParams.targetAgentType,
+                stream_name: route.streamName, worker_id: '', status: 'QUEUED', cancel_requested: false,
+                cancel_reason: '', route_policy: routePolicy, route_status: routeStatus,
             }).catch(() => undefined);
             await this.redis.xadd(route.streamName, '*', 'data', JSON.stringify(command.toDict()));
         }
@@ -692,8 +745,8 @@ export class GatewayClient {
             parentMessageId: requestParams.parentMessageId || '',
             targetAgentType: requestParams.targetAgentType,
             targetWorkerId: route.targetWorkerId,
-            routePolicy: requireOnline ? 'FAIL_FAST' : 'SEND_ANYWAY',
-            routeStatus: params.targetWorkerId ? 'DIRECT_WORKER' : 'DELIVER_NOW',
+            routePolicy,
+            routeStatus,
             startTs: dispatchStartedAt,
             endTs: Date.now(),
         });
@@ -703,6 +756,7 @@ export class GatewayClient {
             message_id: messageId,
             trace_id: traceId,
             target_worker_id: route.targetWorkerId,
+            target_agent_type: requestParams.targetAgentType,
             timestamp: Date.now(),
             status: ExecutionStatus.QUEUED,
         };

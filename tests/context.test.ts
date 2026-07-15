@@ -1,6 +1,10 @@
 import { AgentContext } from '../src/context';
 import { EventType } from '../src/protocol/event_type';
 import { ActionType } from '../src/protocol/action_type';
+import { QueueNames } from '../src/constants';
+import { RoutePolicy } from '../src/availability';
+import { AskAgentCommand } from '../src/protocol/commands';
+import { MessageHeader } from '../src/protocol/message_header';
 
 class MockRedis {
     calls: Array<{ name: string; payload: string }> = [];
@@ -9,6 +13,17 @@ class MockRedis {
     private setStorage: Map<string, string[]> = new Map([
         ['agent_type:workers:demo-agent-ts', ['worker-123']],
     ]);
+    wakeupDecision: Record<string, unknown> | null = null;
+    wakeupDecisions: Record<string, unknown>[] = [];
+    onlineAfterWakeup = '';
+
+    setValue(key: string, value: Record<string, unknown>): void {
+        this.storage.set(key, JSON.stringify(value));
+    }
+
+    setOnline(agentType: string, workerId = 'worker-123'): void {
+        this.setStorage.set(`agent_type:workers:${agentType}`, [workerId]);
+    }
 
     async xadd(name: string, _id: string, field: string, payload: string): Promise<string> {
         if (field !== 'data') {
@@ -52,6 +67,13 @@ class MockRedis {
 
     async zrangebyscore(_key: string, _min: string, _max: string): Promise<string[]> {
         return ['worker-123'];
+    }
+
+    async xread(..._args: unknown[]): Promise<unknown> {
+        const decision = this.wakeupDecisions.shift() || this.wakeupDecision;
+        if (!decision) return null;
+        if (this.onlineAfterWakeup) this.setOnline(this.onlineAfterWakeup);
+        return [['result-stream', [[`${Date.now()}-0`, ['data', JSON.stringify(decision)]]]]];
     }
 
     async hgetall(key: string): Promise<Record<string, string> | null> {
@@ -142,6 +164,145 @@ describe('AgentContext data message format', () => {
         expect(payload.header.parent_message_id).toBe('msg-3');
         expect(payload.body.content).toBe('delegate this');
         expect(payload.body.wait_for_reply).toBe(true);
+    });
+
+    test('callAgent SEND_ANYWAY publishes for an offline AgentType', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-send', 'trace-send', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.SEND_ANYWAY,
+        });
+        expect(result.status).toBe('QUEUED');
+        expect(redis.calls.map(call => call.name)).toEqual([QueueNames.ctrl_stream('cold-agent')]);
+    });
+
+    test('callAgent accepts object content and canonical extraPayload', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-object', 'trace-object', redis as any, 'caller', 'parent');
+        await ctx.callAgent({
+            targetAgentType: 'demo-agent-ts',
+            content: { role: 'user', content: { text: 'hello' } },
+            extraPayload: { source: 'orchestrator' },
+        });
+        const command = JSON.parse(redis.calls[0].payload);
+        expect(command.body.content).toEqual({ role: 'user', content: { text: 'hello' } });
+        expect(command.body.extra_payload).toEqual({ source: 'orchestrator' });
+    });
+
+    test('callAgent QUEUE_ONLY stores a pending delivery without target publish', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-queue', 'trace-queue', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.QUEUE_ONLY,
+            region: 'cn', priority: 7,
+        });
+        expect(result.status).toBe('QUEUED');
+        expect(redis.calls.map(call => call.name)).toEqual([QueueNames.control_plane_delivery_pending_stream()]);
+        const pending = JSON.parse(redis.calls[0].payload);
+        expect(pending.delivery_stream).toBe(QueueNames.ctrl_stream('cold-agent'));
+        expect(pending.region).toBe('cn');
+        expect(pending.priority).toBe(7);
+    });
+
+    test('callAgent WAKE_AND_QUEUE requests wakeup and stores pending delivery', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-wq', 'trace-wq', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.WAKE_AND_QUEUE,
+        });
+        expect(result.status).toBe('QUEUED');
+        expect(redis.calls.map(call => call.name)).toEqual([
+            QueueNames.control_plane_wakeup_stream(), QueueNames.control_plane_delivery_pending_stream(),
+        ]);
+    });
+
+    test('callAgent WAKE_AND_WAIT publishes only after READY and membership recheck', async () => {
+        const redis = new MockRedis();
+        redis.wakeupDecision = { status: 'READY' };
+        redis.onlineAfterWakeup = 'cold-agent';
+        const ctx = new AgentContext('sess-ww', 'trace-ww', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.WAKE_AND_WAIT,
+            availabilityTimeoutMs: 10,
+        });
+        expect(result.status).toBe('QUEUED');
+        expect(redis.calls.map(call => call.name)).toEqual([
+            QueueNames.control_plane_wakeup_stream(), QueueNames.ctrl_stream('cold-agent'),
+        ]);
+    });
+
+    test('callAgent WAKE_AND_WAIT continues through STARTING until READY', async () => {
+        const redis = new MockRedis();
+        redis.wakeupDecisions = [{ status: 'STARTING' }, { status: 'READY' }];
+        redis.onlineAfterWakeup = 'cold-agent';
+        const ctx = new AgentContext('sess-start', 'trace-start', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.WAKE_AND_WAIT,
+            availabilityTimeoutMs: 50,
+        });
+        expect(result.status).toBe('QUEUED');
+        expect(redis.calls.at(-1)?.name).toBe(QueueNames.ctrl_stream('cold-agent'));
+    });
+
+    test('callAgent rejects an unsupported policy even when the AgentType is online', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-invalid', 'trace-invalid', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'demo-agent-ts', content: 'work', routePolicy: 'INVALID' as any,
+        });
+        expect(result.status).toBe('FAILED');
+        expect(result.messageId).not.toBe('');
+        expect(redis.calls).toEqual([]);
+    });
+
+    test('callAgent routes an offline AgentType to an online configured fallback', async () => {
+        const redis = new MockRedis();
+        redis.setValue(QueueNames.control_plane_agent_fallback('cold-agent'), { selected_agent_type: 'warm-agent' });
+        redis.setOnline('warm-agent');
+        const ctx = new AgentContext('sess-fb', 'trace-fb', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({ targetAgentType: 'cold-agent', content: 'work' });
+        expect(result.targetAgentType).toBe('warm-agent');
+        expect(redis.calls.map(call => call.name)).toEqual([QueueNames.ctrl_stream('warm-agent')]);
+        expect(JSON.parse(redis.calls[0].payload).header.target_agent_type).toBe('warm-agent');
+    });
+
+    test('callAgent rejects an open circuit without delivery writes', async () => {
+        const redis = new MockRedis();
+        redis.setValue(QueueNames.control_plane_agent_circuit('demo-agent-ts'), { state: 'OPEN', reason: 'maintenance' });
+        const ctx = new AgentContext('sess-circuit', 'trace-circuit', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({ targetAgentType: 'demo-agent-ts', content: 'work' });
+        expect(result.status).toBe('FAILED');
+        expect(result.error_code).toBe('AGENT_CIRCUIT_OPEN');
+        expect(redis.calls).toEqual([]);
+    });
+
+    test('callAgent rejects an exhausted user quota before delivery', async () => {
+        const redis = new MockRedis();
+        redis.setValue(QueueNames.control_plane_user_quota('user-1'), { available: false, reason: 'limit' });
+        const currentCommand = new AskAgentCommand(
+            new MessageHeader('parent', 'sess-quota', 'trace-quota', { userCode: 'user-1' }),
+            'current'
+        );
+        const ctx = new AgentContext('sess-quota', 'trace-quota', redis as any, 'caller', 'parent', currentCommand);
+        const result = await ctx.callAgent({
+            targetAgentType: 'demo-agent-ts', content: 'work',
+            routePolicy: RoutePolicy.SEND_ANYWAY,
+        });
+        expect(result.status).toBe('FAILED');
+        expect(result.error_code).toBe('TENANT_QUOTA_EXCEEDED');
+        expect(redis.calls).toEqual([]);
+    });
+
+    test('callAgent WAKE_AND_WAIT times out without target delivery', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-timeout', 'trace-timeout', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.WAKE_AND_WAIT,
+            availabilityTimeoutMs: 0,
+        });
+        expect(result.status).toBe('FAILED');
+        expect(result.error_code).toBe('AGENT_TYPE_UNAVAILABLE');
+        expect(redis.calls.map(call => call.name)).toEqual([QueueNames.control_plane_wakeup_stream()]);
     });
 
     test('isCancelRequested is false by default', () => {

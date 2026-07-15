@@ -13,6 +13,20 @@ export function generateExecutionId(): string {
     return `exec-${uuidv4().slice(0, 8)}`;
 }
 
+export function retargetAskAgentCommand(command: AskAgentCommand, targetAgentType: string): AskAgentCommand {
+    const header = command.header;
+    return new AskAgentCommand(
+        new MessageHeader(header.messageId, header.sessionId, header.traceId, {
+            sourceAgentType: header.sourceAgentType, targetAgentType,
+            parentMessageId: header.parentMessageId, taskGroupId: header.taskGroupId,
+            userCode: header.userCode, userName: header.userName, metadata: header.metadata,
+            traceParentSpanId: header.traceParentSpanId,
+            langfuseParentObservationId: header.langfuseParentObservationId,
+        }),
+        command.content, command.waitForReply, command.extraPayload
+    );
+}
+
 /**
  * Build command + ctrl stream + execution record for one AskAgent publish.
  */
@@ -23,7 +37,7 @@ export function buildAskAgentPublishArtifacts(
     waitForReply: boolean,
     queueNames: AskAgentQueueNames = QueueNames
 ): AskAgentPublishArtifacts {
-    const mergedPayload: Record<string, unknown> = { ...(input.payload || {}) };
+    const mergedPayload: Record<string, unknown> = { ...(input.extraPayload || {}) };
     if (waitForReply) {
         mergedPayload.wait_for_reply = true;
     }
@@ -39,7 +53,7 @@ export function buildAskAgentPublishArtifacts(
             metadata: input.metadata,
             langfuseParentObservationId: input.langfuseParentObservationId || '',
         }),
-        input.content as string | unknown[],
+        input.content,
         waitForReply,
         Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
     );

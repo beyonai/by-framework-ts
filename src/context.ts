@@ -2,6 +2,7 @@ import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_TTL_SECONDS } from './constants';
 import { createRedisCallAgentDeps, callAgent as publishCallAgent } from './dispatch/dispatch_ask_agent';
+import { RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
 import type { CallAgentPublishInput } from './dispatch/types';
 import { EventType } from './protocol/event_type';
 import { AgentState } from './protocol/agent_state';
@@ -33,13 +34,29 @@ interface CancelSignalLegacy {
     readonly reason?: string;
 }
 
-interface CallAgentResult {
+export interface CallAgentResult {
     status: string;
     messageId: string;
     parentMessageId?: string;
     targetAgentType: string;
     error?: string;
     error_code?: string;
+}
+
+export interface CallAgentParams {
+    readonly targetAgentType: string;
+    readonly content: unknown;
+    readonly extraPayload?: Readonly<Record<string, unknown>>;
+    /** @deprecated Use extraPayload. */
+    readonly payload?: Readonly<Record<string, unknown>>;
+    readonly waitForReply?: boolean;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly messageId?: string;
+    readonly parentMessageId?: string;
+    readonly routePolicy?: RoutePolicyType;
+    readonly availabilityTimeoutMs?: number;
+    readonly region?: string;
+    readonly priority?: number;
 }
 
 interface DispatchedTask {
@@ -265,22 +282,7 @@ export class AgentContext {
         this.historySaved = true;
     }
 
-    async callAgent(params: {
-        readonly targetAgentType: string;
-        readonly content: string | Array<Record<string, unknown>>;
-        readonly payload?: Readonly<Record<string, unknown>>;
-        readonly waitForReply?: boolean;
-        readonly userCode?: string;
-        readonly userName?: string;
-        readonly taskGroupId?: string;
-        readonly metadata?: Readonly<Record<string, unknown>>;
-        readonly messageId?: string;
-        readonly parentMessageId?: string;
-        readonly probeAgentType?: boolean;
-        /** Explicitly set the Langfuse parent observation ID for this sub-call.
-         *  Overrides context.traceParentObservationId when provided. */
-        readonly langfuseParentObservationId?: string;
-    }): Promise<CallAgentResult> {
+    async callAgent(params: CallAgentParams): Promise<CallAgentResult> {
         const { WorkerRegistry } = await import('./registry');
         const registry = new WorkerRegistry(this.redis);
         const deps = createRedisCallAgentDeps({ redis: this.redis, registry, queueNames: QueueNames });
@@ -296,6 +298,9 @@ export class AgentContext {
             framework_parent_span_id: callParentSpanId,
         };
 
+        const currentHeader = this.currentCommand instanceof AskAgentCommand
+            ? this.currentCommand.header
+            : undefined;
         const input: CallAgentPublishInput = {
             sessionId: this.sessionId,
             traceId: this.traceId,
@@ -303,16 +308,19 @@ export class AgentContext {
             defaultParentMessageId: this.currentMessageId,
             targetAgentType: params.targetAgentType,
             content: params.content,
-            payload: params.payload,
+            extraPayload: params.extraPayload ?? params.payload,
             waitForReply: params.waitForReply,
-            userCode: params.userCode,
-            userName: params.userName,
-            taskGroupId: params.taskGroupId,
+            userCode: currentHeader?.userCode,
+            userName: currentHeader?.userName,
+            taskGroupId: currentHeader?.taskGroupId,
             metadata: mergedMetadata,
             messageId,
             parentMessageId: params.parentMessageId,
-            probeAgentType: params.probeAgentType,
-            langfuseParentObservationId: params.langfuseParentObservationId ?? this.traceParentObservationId ?? '',
+            routePolicy: params.routePolicy,
+            availabilityTimeoutMs: params.availabilityTimeoutMs,
+            region: params.region,
+            priority: params.priority,
+            langfuseParentObservationId: this.traceParentObservationId || '',
         };
 
         if (this.pluginRegistry) {
@@ -334,12 +342,22 @@ export class AgentContext {
             messageId: raw.messageId || messageId,
             parentMessageId: params.parentMessageId || this.currentMessageId,
             sourceAgentType: params.waitForReply !== false ? this.currentAgentType : '',
-            targetAgentType: params.targetAgentType,
-            routePolicy: 'FAIL_FAST',
-            routeStatus: raw.status,
+            targetAgentType: raw.targetAgentType || params.targetAgentType,
+            routePolicy: params.routePolicy ?? RoutePolicy.FAIL_FAST,
+            routeStatus: raw.routeStatus || raw.status,
             startTs: dispatchStartTs,
             endTs: Date.now(),
         });
+
+        if (raw.status === AgentState.FAILED) {
+            if (this.pluginRegistry) {
+                await this.pluginRegistry.onCallAgentError(this, params, new Error(raw.error || 'Agent type unavailable'));
+            }
+            return {
+                status: raw.status, messageId: raw.messageId, parentMessageId: raw.parentMessageId,
+                targetAgentType: raw.targetAgentType, error: raw.error, error_code: raw.error_code,
+            };
+        }
 
         if (raw.runtimeHint === 'suspend' || params.waitForReply !== false) {
             this._isSuspended = true;

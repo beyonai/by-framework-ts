@@ -49,6 +49,8 @@ describe('constants v1/v2 key schema', () => {
         test('QueueNames methods are unchanged', () => {
             expect(QueueNames.ctrl_stream('chat')).toBe('byai_gateway:ctrl:agent_type:chat');
             expect(QueueNames.worker_ctrl_stream('worker-01')).toBe('byai_gateway:ctrl:worker:worker-01');
+            expect(QueueNames.control_plane_wakeup_stream()).toBe('byai_gateway:control_plane:mgmt:wakeup');
+            expect(QueueNames.control_plane_delivery_pending_stream()).toBe('byai_gateway:control_plane:mgmt:delivery:pending');
             expect(QueueNames.session_data_stream('sess-abc123')).toBe(
                 'byai_gateway:session:sess-abc123:data_stream'
             );

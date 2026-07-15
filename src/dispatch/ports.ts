@@ -20,4 +20,7 @@ export interface AskAgentDispatchDeps {
     readonly execution: ExecutionInitializer;
     readonly bus: CommandBus;
     readonly queueNames: AskAgentQueueNames;
+    readonly availability?: {
+        prepare(input: import('./types').CallAgentPublishInput, commandPayload: Record<string, unknown>, executionId: string, messageId: string): Promise<import('../availability').AvailabilityResult>;
+    };
 }

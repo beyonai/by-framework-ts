@@ -10,6 +10,7 @@ export interface SendMessageResponse {
     message_id: string;
     trace_id: string;
     target_worker_id: string;
+    target_agent_type?: string;
     timestamp: number;
     status: string;
     error?: string;
