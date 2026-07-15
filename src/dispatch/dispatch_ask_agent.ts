@@ -19,7 +19,7 @@ export async function callAgent(
     deps: AskAgentDispatchDeps,
     input: CallAgentPublishInput
 ): Promise<CallAgentPublishResult> {
-    const policy = input.routePolicy ?? ((input.probeAgentType ?? true) ? RoutePolicy.FAIL_FAST : RoutePolicy.SEND_ANYWAY);
+    const policy = input.routePolicy ?? RoutePolicy.FAIL_FAST;
     if (!deps.availability) {
       const probeAgentType = policy === RoutePolicy.FAIL_FAST;
       if (probeAgentType) {

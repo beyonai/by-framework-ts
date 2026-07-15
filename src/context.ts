@@ -34,13 +34,29 @@ interface CancelSignalLegacy {
     readonly reason?: string;
 }
 
-interface CallAgentResult {
+export interface CallAgentResult {
     status: string;
     messageId: string;
     parentMessageId?: string;
     targetAgentType: string;
     error?: string;
     error_code?: string;
+}
+
+export interface CallAgentParams {
+    readonly targetAgentType: string;
+    readonly content: unknown;
+    readonly extraPayload?: Readonly<Record<string, unknown>>;
+    /** @deprecated Use extraPayload. */
+    readonly payload?: Readonly<Record<string, unknown>>;
+    readonly waitForReply?: boolean;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly messageId?: string;
+    readonly parentMessageId?: string;
+    readonly routePolicy?: RoutePolicyType;
+    readonly availabilityTimeoutMs?: number;
+    readonly region?: string;
+    readonly priority?: number;
 }
 
 interface DispatchedTask {
@@ -266,26 +282,7 @@ export class AgentContext {
         this.historySaved = true;
     }
 
-    async callAgent(params: {
-        readonly targetAgentType: string;
-        readonly content: string | Array<Record<string, unknown>>;
-        readonly payload?: Readonly<Record<string, unknown>>;
-        readonly waitForReply?: boolean;
-        readonly userCode?: string;
-        readonly userName?: string;
-        readonly taskGroupId?: string;
-        readonly metadata?: Readonly<Record<string, unknown>>;
-        readonly messageId?: string;
-        readonly parentMessageId?: string;
-        readonly probeAgentType?: boolean;
-        readonly routePolicy?: RoutePolicyType;
-        readonly availabilityTimeoutMs?: number;
-        readonly region?: string;
-        readonly priority?: number;
-        /** Explicitly set the Langfuse parent observation ID for this sub-call.
-         *  Overrides context.traceParentObservationId when provided. */
-        readonly langfuseParentObservationId?: string;
-    }): Promise<CallAgentResult> {
+    async callAgent(params: CallAgentParams): Promise<CallAgentResult> {
         const { WorkerRegistry } = await import('./registry');
         const registry = new WorkerRegistry(this.redis);
         const deps = createRedisCallAgentDeps({ redis: this.redis, registry, queueNames: QueueNames });
@@ -301,6 +298,9 @@ export class AgentContext {
             framework_parent_span_id: callParentSpanId,
         };
 
+        const currentHeader = this.currentCommand instanceof AskAgentCommand
+            ? this.currentCommand.header
+            : undefined;
         const input: CallAgentPublishInput = {
             sessionId: this.sessionId,
             traceId: this.traceId,
@@ -308,20 +308,19 @@ export class AgentContext {
             defaultParentMessageId: this.currentMessageId,
             targetAgentType: params.targetAgentType,
             content: params.content,
-            payload: params.payload,
+            extraPayload: params.extraPayload ?? params.payload,
             waitForReply: params.waitForReply,
-            userCode: params.userCode,
-            userName: params.userName,
-            taskGroupId: params.taskGroupId,
+            userCode: currentHeader?.userCode,
+            userName: currentHeader?.userName,
+            taskGroupId: currentHeader?.taskGroupId,
             metadata: mergedMetadata,
             messageId,
             parentMessageId: params.parentMessageId,
-            probeAgentType: params.probeAgentType,
-            routePolicy: params.routePolicy ?? (params.probeAgentType === undefined ? undefined : (params.probeAgentType ? RoutePolicy.FAIL_FAST : RoutePolicy.SEND_ANYWAY)),
+            routePolicy: params.routePolicy,
             availabilityTimeoutMs: params.availabilityTimeoutMs,
             region: params.region,
             priority: params.priority,
-            langfuseParentObservationId: params.langfuseParentObservationId ?? this.traceParentObservationId ?? '',
+            langfuseParentObservationId: this.traceParentObservationId || '',
         };
 
         if (this.pluginRegistry) {
@@ -344,7 +343,7 @@ export class AgentContext {
             parentMessageId: params.parentMessageId || this.currentMessageId,
             sourceAgentType: params.waitForReply !== false ? this.currentAgentType : '',
             targetAgentType: raw.targetAgentType || params.targetAgentType,
-            routePolicy: params.routePolicy ?? (params.probeAgentType === false ? RoutePolicy.SEND_ANYWAY : RoutePolicy.FAIL_FAST),
+            routePolicy: params.routePolicy ?? RoutePolicy.FAIL_FAST,
             routeStatus: raw.routeStatus || raw.status,
             startTs: dispatchStartTs,
             endTs: Date.now(),

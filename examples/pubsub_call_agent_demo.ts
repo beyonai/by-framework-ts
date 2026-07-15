@@ -172,7 +172,7 @@ async function main() {
                 content:         String(content),
                 waitForReply:    false,
                 // 透传给子 agent 的额外参数
-                payload: { source: ORCHESTRATOR_AGENT_TYPE },
+                extraPayload: { source: ORCHESTRATOR_AGENT_TYPE },
                 // langfuseParentObservationId 由框架自动从 context.traceParentObservationId 写入，
                 // 无需手动传递
             });

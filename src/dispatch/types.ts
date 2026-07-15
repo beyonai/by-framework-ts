@@ -12,8 +12,8 @@ export interface CallAgentPublishInput {
     /** Default parent message when `parentMessageId` is omitted (e.g. current worker message id). */
     readonly defaultParentMessageId: string;
     readonly targetAgentType: string;
-    readonly content: string | ReadonlyArray<Record<string, unknown>>;
-    readonly payload?: Readonly<Record<string, unknown>>;
+    readonly content: unknown;
+    readonly extraPayload?: Readonly<Record<string, unknown>>;
     readonly waitForReply?: boolean;
     /** Optional user code propagated to MessageHeader.user_code. */
     readonly userCode?: string;
@@ -24,7 +24,6 @@ export interface CallAgentPublishInput {
     readonly metadata?: Readonly<Record<string, unknown>>;
     readonly messageId?: string;
     readonly parentMessageId?: string;
-    readonly probeAgentType?: boolean;
     readonly routePolicy?: RoutePolicy;
     readonly availabilityTimeoutMs?: number;
     readonly region?: string;

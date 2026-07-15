@@ -37,7 +37,7 @@ export function buildAskAgentPublishArtifacts(
     waitForReply: boolean,
     queueNames: AskAgentQueueNames = QueueNames
 ): AskAgentPublishArtifacts {
-    const mergedPayload: Record<string, unknown> = { ...(input.payload || {}) };
+    const mergedPayload: Record<string, unknown> = { ...(input.extraPayload || {}) };
     if (waitForReply) {
         mergedPayload.wait_for_reply = true;
     }
@@ -53,7 +53,7 @@ export function buildAskAgentPublishArtifacts(
             metadata: input.metadata,
             langfuseParentObservationId: input.langfuseParentObservationId || '',
         }),
-        input.content as string | unknown[],
+        input.content,
         waitForReply,
         Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
     );

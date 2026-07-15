@@ -3,6 +3,8 @@ import { EventType } from '../src/protocol/event_type';
 import { ActionType } from '../src/protocol/action_type';
 import { QueueNames } from '../src/constants';
 import { RoutePolicy } from '../src/availability';
+import { AskAgentCommand } from '../src/protocol/commands';
+import { MessageHeader } from '../src/protocol/message_header';
 
 class MockRedis {
     calls: Array<{ name: string; payload: string }> = [];
@@ -174,6 +176,19 @@ describe('AgentContext data message format', () => {
         expect(redis.calls.map(call => call.name)).toEqual([QueueNames.ctrl_stream('cold-agent')]);
     });
 
+    test('callAgent accepts object content and canonical extraPayload', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-object', 'trace-object', redis as any, 'caller', 'parent');
+        await ctx.callAgent({
+            targetAgentType: 'demo-agent-ts',
+            content: { role: 'user', content: { text: 'hello' } },
+            extraPayload: { source: 'orchestrator' },
+        });
+        const command = JSON.parse(redis.calls[0].payload);
+        expect(command.body.content).toEqual({ role: 'user', content: { text: 'hello' } });
+        expect(command.body.extra_payload).toEqual({ source: 'orchestrator' });
+    });
+
     test('callAgent QUEUE_ONLY stores a pending delivery without target publish', async () => {
         const redis = new MockRedis();
         const ctx = new AgentContext('sess-queue', 'trace-queue', redis as any, 'caller', 'parent');
@@ -264,9 +279,13 @@ describe('AgentContext data message format', () => {
     test('callAgent rejects an exhausted user quota before delivery', async () => {
         const redis = new MockRedis();
         redis.setValue(QueueNames.control_plane_user_quota('user-1'), { available: false, reason: 'limit' });
-        const ctx = new AgentContext('sess-quota', 'trace-quota', redis as any, 'caller', 'parent');
+        const currentCommand = new AskAgentCommand(
+            new MessageHeader('parent', 'sess-quota', 'trace-quota', { userCode: 'user-1' }),
+            'current'
+        );
+        const ctx = new AgentContext('sess-quota', 'trace-quota', redis as any, 'caller', 'parent', currentCommand);
         const result = await ctx.callAgent({
-            targetAgentType: 'demo-agent-ts', content: 'work', userCode: 'user-1',
+            targetAgentType: 'demo-agent-ts', content: 'work',
             routePolicy: RoutePolicy.SEND_ANYWAY,
         });
         expect(result.status).toBe('FAILED');
