@@ -2,6 +2,7 @@ import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_TTL_SECONDS } from './constants';
 import { createRedisCallAgentDeps, callAgent as publishCallAgent } from './dispatch/dispatch_ask_agent';
+import { RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
 import type { CallAgentPublishInput } from './dispatch/types';
 import { EventType } from './protocol/event_type';
 import { AgentState } from './protocol/agent_state';
@@ -277,6 +278,10 @@ export class AgentContext {
         readonly messageId?: string;
         readonly parentMessageId?: string;
         readonly probeAgentType?: boolean;
+        readonly routePolicy?: RoutePolicyType;
+        readonly availabilityTimeoutMs?: number;
+        readonly region?: string;
+        readonly priority?: number;
         /** Explicitly set the Langfuse parent observation ID for this sub-call.
          *  Overrides context.traceParentObservationId when provided. */
         readonly langfuseParentObservationId?: string;
@@ -312,6 +317,10 @@ export class AgentContext {
             messageId,
             parentMessageId: params.parentMessageId,
             probeAgentType: params.probeAgentType,
+            routePolicy: params.routePolicy ?? (params.probeAgentType === undefined ? undefined : (params.probeAgentType ? RoutePolicy.FAIL_FAST : RoutePolicy.SEND_ANYWAY)),
+            availabilityTimeoutMs: params.availabilityTimeoutMs,
+            region: params.region,
+            priority: params.priority,
             langfuseParentObservationId: params.langfuseParentObservationId ?? this.traceParentObservationId ?? '',
         };
 
@@ -334,12 +343,22 @@ export class AgentContext {
             messageId: raw.messageId || messageId,
             parentMessageId: params.parentMessageId || this.currentMessageId,
             sourceAgentType: params.waitForReply !== false ? this.currentAgentType : '',
-            targetAgentType: params.targetAgentType,
-            routePolicy: 'FAIL_FAST',
-            routeStatus: raw.status,
+            targetAgentType: raw.targetAgentType || params.targetAgentType,
+            routePolicy: params.routePolicy ?? (params.probeAgentType === false ? RoutePolicy.SEND_ANYWAY : RoutePolicy.FAIL_FAST),
+            routeStatus: raw.routeStatus || raw.status,
             startTs: dispatchStartTs,
             endTs: Date.now(),
         });
+
+        if (raw.status === AgentState.FAILED) {
+            if (this.pluginRegistry) {
+                await this.pluginRegistry.onCallAgentError(this, params, new Error(raw.error || 'Agent type unavailable'));
+            }
+            return {
+                status: raw.status, messageId: raw.messageId, parentMessageId: raw.parentMessageId,
+                targetAgentType: raw.targetAgentType, error: raw.error, error_code: raw.error_code,
+            };
+        }
 
         if (raw.runtimeHint === 'suspend' || params.waitForReply !== false) {
             this._isSuspended = true;

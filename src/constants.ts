@@ -97,6 +97,45 @@ export class QueueNames {
     return versioned(`byai_gateway:ctrl:worker:${workerId}`, `ctrl:worker:{${workerId}}`);
   }
 
+  static control_plane_wakeup_stream(): string {
+    return versioned('byai_gateway:control_plane:mgmt:wakeup', 'control_plane:mgmt:wakeup');
+  }
+
+  static control_plane_wakeup_result_stream(executionId: string): string {
+    return versioned(
+      `byai_gateway:control_plane:mgmt:wakeup:result:${executionId}`,
+      `control_plane:mgmt:wakeup:result:${executionId}`
+    );
+  }
+
+  static control_plane_delivery_pending_stream(): string {
+    return versioned(
+      'byai_gateway:control_plane:mgmt:delivery:pending',
+      'control_plane:mgmt:delivery:pending'
+    );
+  }
+
+  static control_plane_agent_circuit(agentType: string): string {
+    return versioned(
+      `byai_gateway:control_plane:circuit:agent_type:${agentType}`,
+      `control_plane:circuit:agent_type:${agentType}`
+    );
+  }
+
+  static control_plane_agent_fallback(agentType: string): string {
+    return versioned(
+      `byai_gateway:control_plane:fallback:agent_type:${agentType}`,
+      `control_plane:fallback:agent_type:${agentType}`
+    );
+  }
+
+  static control_plane_user_quota(userCode: string): string {
+    return versioned(
+      `byai_gateway:control_plane:quota:user:${userCode}`,
+      `control_plane:quota:user:${userCode}`
+    );
+  }
+
   /**
    * Session-level data stream. Workers push streaming content here.
    * Same-entity with RegistryKeys.session_registry.

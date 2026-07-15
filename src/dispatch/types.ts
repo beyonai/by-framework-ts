@@ -1,4 +1,5 @@
 import type { AskAgentCommand } from '../protocol/commands';
+import type { RoutePolicy } from '../availability';
 
 /** How the host runtime may adjust local scheduling after a successful publish (not sent over Redis). */
 export type AskAgentRuntimeHint = 'suspend' | 'transfer' | 'none';
@@ -24,6 +25,10 @@ export interface CallAgentPublishInput {
     readonly messageId?: string;
     readonly parentMessageId?: string;
     readonly probeAgentType?: boolean;
+    readonly routePolicy?: RoutePolicy;
+    readonly availabilityTimeoutMs?: number;
+    readonly region?: string;
+    readonly priority?: number;
     /** Langfuse parent observation ID to nest this sub-agent under the caller's task span. */
     readonly langfuseParentObservationId?: string;
 }
@@ -36,6 +41,7 @@ export interface CallAgentPublishResult {
     readonly error?: string;
     readonly error_code?: string;
     readonly runtimeHint?: AskAgentRuntimeHint;
+    readonly routeStatus?: string;
 }
 
 export interface AskAgentPublishArtifacts {

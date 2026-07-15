@@ -4,6 +4,8 @@ import { MessageHeader } from '../src/protocol/message_header';
 import { BaiYingMessageRole } from '../src/protocol/message';
 import { ActionType } from '../src/protocol/action_type';
 import { spanIdHex } from '../src/trace/span_recorder';
+import { RoutePolicy } from '../src/availability';
+import { QueueNames } from '../src/constants';
 
 class CustomCommand extends BaseCommand {
     static actionType = 'CUSTOM_CLIENT';
@@ -104,6 +106,21 @@ describe('GatewayClient', () => {
             );
             expect((client as any).registry.initializeExecution.mock.invocationCallOrder[0]).toBeLessThan(
                 mockRedis.xadd.mock.invocationCallOrder[0]
+            );
+        });
+
+        it('should expose QUEUE_ONLY through GatewayClient without target publication', async () => {
+            (client as any).registry.hasOnlineAgentType.mockResolvedValueOnce([false, []]);
+            const response = await client.sendMessage({
+                targetAgentType: 'cold-agent', sessionId: 'queued-session', content: 'later',
+                routePolicy: RoutePolicy.QUEUE_ONLY,
+            });
+            expect(response.success).toBe(true);
+            expect(response.status).toBe('QUEUED');
+            expect(mockRedis.xadd).toHaveBeenCalledTimes(1);
+            expect(mockRedis.xadd.mock.calls[0][0]).toBe(QueueNames.control_plane_delivery_pending_stream());
+            expect(mockRedis.xadd).not.toHaveBeenCalledWith(
+                QueueNames.ctrl_stream('cold-agent'), expect.anything(), expect.anything(), expect.anything()
             );
         });
 
