@@ -12,6 +12,7 @@ class MockRedis {
         ['agent_type:workers:demo-agent-ts', ['worker-123']],
     ]);
     wakeupDecision: Record<string, unknown> | null = null;
+    wakeupDecisions: Record<string, unknown>[] = [];
     onlineAfterWakeup = '';
 
     setValue(key: string, value: Record<string, unknown>): void {
@@ -67,9 +68,10 @@ class MockRedis {
     }
 
     async xread(..._args: unknown[]): Promise<unknown> {
-        if (!this.wakeupDecision) return null;
+        const decision = this.wakeupDecisions.shift() || this.wakeupDecision;
+        if (!decision) return null;
         if (this.onlineAfterWakeup) this.setOnline(this.onlineAfterWakeup);
-        return [['result-stream', [['1-0', ['data', JSON.stringify(this.wakeupDecision)]]]]];
+        return [['result-stream', [[`${Date.now()}-0`, ['data', JSON.stringify(decision)]]]]];
     }
 
     async hgetall(key: string): Promise<Record<string, string> | null> {
@@ -212,6 +214,30 @@ describe('AgentContext data message format', () => {
         expect(redis.calls.map(call => call.name)).toEqual([
             QueueNames.control_plane_wakeup_stream(), QueueNames.ctrl_stream('cold-agent'),
         ]);
+    });
+
+    test('callAgent WAKE_AND_WAIT continues through STARTING until READY', async () => {
+        const redis = new MockRedis();
+        redis.wakeupDecisions = [{ status: 'STARTING' }, { status: 'READY' }];
+        redis.onlineAfterWakeup = 'cold-agent';
+        const ctx = new AgentContext('sess-start', 'trace-start', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.WAKE_AND_WAIT,
+            availabilityTimeoutMs: 50,
+        });
+        expect(result.status).toBe('QUEUED');
+        expect(redis.calls.at(-1)?.name).toBe(QueueNames.ctrl_stream('cold-agent'));
+    });
+
+    test('callAgent rejects an unsupported policy even when the AgentType is online', async () => {
+        const redis = new MockRedis();
+        const ctx = new AgentContext('sess-invalid', 'trace-invalid', redis as any, 'caller', 'parent');
+        const result = await ctx.callAgent({
+            targetAgentType: 'demo-agent-ts', content: 'work', routePolicy: 'INVALID' as any,
+        });
+        expect(result.status).toBe('FAILED');
+        expect(result.messageId).not.toBe('');
+        expect(redis.calls).toEqual([]);
     });
 
     test('callAgent routes an offline AgentType to an online configured fallback', async () => {

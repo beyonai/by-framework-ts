@@ -13,6 +13,20 @@ export function generateExecutionId(): string {
     return `exec-${uuidv4().slice(0, 8)}`;
 }
 
+export function retargetAskAgentCommand(command: AskAgentCommand, targetAgentType: string): AskAgentCommand {
+    const header = command.header;
+    return new AskAgentCommand(
+        new MessageHeader(header.messageId, header.sessionId, header.traceId, {
+            sourceAgentType: header.sourceAgentType, targetAgentType,
+            parentMessageId: header.parentMessageId, taskGroupId: header.taskGroupId,
+            userCode: header.userCode, userName: header.userName, metadata: header.metadata,
+            traceParentSpanId: header.traceParentSpanId,
+            langfuseParentObservationId: header.langfuseParentObservationId,
+        }),
+        command.content, command.waitForReply, command.extraPayload
+    );
+}
+
 /**
  * Build command + ctrl stream + execution record for one AskAgent publish.
  */

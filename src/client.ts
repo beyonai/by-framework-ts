@@ -10,6 +10,7 @@ import { QueueNames } from './constants';
 import { initializeQueuedExecution } from './dispatch/execution_init';
 import { AvailabilityRouter, AvailabilityStatus, RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
 import { publishAskAgentCommand } from './dispatch/publish_ask_agent';
+import { retargetAskAgentCommand } from './dispatch/ask_agent_build';
 import { BaiYingMessage } from './protocol/message';
 import { GatewayInterceptor } from './interceptors';
 import { SpanRecorder, spanIdHex } from './trace/span_recorder';
@@ -686,21 +687,14 @@ export class GatewayClient {
                 }).catch(() => undefined);
                 this.endLangfuseClientDispatchObservation(langfuseClientDispatch, { success: false, error }, error);
                 return {
-                    success: false, status: ExecutionStatus.FAILED, message_id: '', trace_id: '',
+                    success: false, status: ExecutionStatus.FAILED, message_id: messageId, trace_id: traceId,
                     target_worker_id: '', timestamp: Date.now(), error,
                     error_code: availability.errorCode || ExecutionStatus.ERR_AGENT_TYPE_UNAVAILABLE,
                 };
             }
             route.streamName = availability.streamName || route.streamName;
             if (availability.selectedAgentType && command instanceof AskAgentCommand) {
-                const old = command.header;
-                command = new AskAgentCommand(new MessageHeader(old.messageId, old.sessionId, old.traceId, {
-                    sourceAgentType: old.sourceAgentType, targetAgentType: availability.selectedAgentType,
-                    parentMessageId: old.parentMessageId, taskGroupId: old.taskGroupId,
-                    userCode: old.userCode, userName: old.userName, metadata: old.metadata,
-                    traceParentSpanId: old.traceParentSpanId,
-                    langfuseParentObservationId: old.langfuseParentObservationId,
-                }), command.content, command.waitForReply, command.extraPayload);
+                command = retargetAskAgentCommand(command, availability.selectedAgentType);
                 requestParams.targetAgentType = availability.selectedAgentType;
             }
         }
@@ -762,6 +756,7 @@ export class GatewayClient {
             message_id: messageId,
             trace_id: traceId,
             target_worker_id: route.targetWorkerId,
+            target_agent_type: requestParams.targetAgentType,
             timestamp: Date.now(),
             status: ExecutionStatus.QUEUED,
         };

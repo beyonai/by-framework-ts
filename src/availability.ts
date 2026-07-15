@@ -59,6 +59,9 @@ export class AvailabilityRouter {
     constructor(private readonly redis: Redis, private readonly registry: WorkerRegistry) {}
 
     async prepareDelivery(intent: DeliveryIntent): Promise<AvailabilityResult> {
+        if (!Object.values(RoutePolicy).includes(intent.policy)) {
+            return this.reject(`Unsupported offline route policy '${intent.policy}'`, 'AGENT_TYPE_UNAVAILABLE');
+        }
         const circuit = await this.readJson(QueueNames.control_plane_agent_circuit(intent.targetAgentType));
         if (String(circuit?.state || '').toUpperCase() === 'OPEN') {
             return this.reject(String(circuit?.reason || 'agent circuit is open'), 'AGENT_CIRCUIT_OPEN');
@@ -132,18 +135,28 @@ export class AvailabilityRouter {
         const resultStream = QueueNames.control_plane_wakeup_result_stream(intent.executionId);
         const timeout = Math.max(0, intent.timeoutMs ?? 30000);
         if (timeout === 0) return this.reject(`Timed out waiting for worker wakeup for agent_type '${intent.targetAgentType}'`, 'AGENT_TYPE_UNAVAILABLE');
-        const messages = await (this.redis.xread as any)('COUNT', 1, 'BLOCK', timeout, 'STREAMS', resultStream, '0-0');
-        if (!messages?.length) return this.reject(`Timed out waiting for worker wakeup for agent_type '${intent.targetAgentType}'`, 'AGENT_TYPE_UNAVAILABLE');
-        const fields: unknown[] = messages[0][1][0][1];
-        const dataIndex = fields.findIndex(field => asString(field) === 'data');
-        const decision = parseJson(dataIndex >= 0 ? asString(fields[dataIndex + 1]) : null) || {};
-        if (decision.status === 'READY' && (await this.registry.hasOnlineAgentType(intent.targetAgentType))[0]) {
-            return { status: AvailabilityStatus.WAIT_AND_DELIVER, streamName: QueueNames.ctrl_stream(intent.targetAgentType) };
+        const deadline = Date.now() + timeout;
+        let lastId = '0-0';
+        while (Date.now() < deadline) {
+            const remaining = Math.max(1, deadline - Date.now());
+            const messages = await (this.redis.xread as any)('COUNT', 1, 'BLOCK', remaining, 'STREAMS', resultStream, lastId);
+            if (!messages?.length) break;
+            const entry = messages[0][1][0];
+            lastId = asString(entry[0]) || lastId;
+            const fields: unknown[] = entry[1];
+            const dataIndex = fields.findIndex(field => asString(field) === 'data');
+            const decision = parseJson(dataIndex >= 0 ? asString(fields[dataIndex + 1]) : null);
+            if (!decision || (decision.execution_id && decision.execution_id !== intent.executionId)) continue;
+            if (decision.status === 'STARTING' || decision.status === 'QUEUED') continue;
+            if (decision.status === 'READY' && (await this.registry.hasOnlineAgentType(intent.targetAgentType))[0]) {
+                return { status: AvailabilityStatus.WAIT_AND_DELIVER, streamName: QueueNames.ctrl_stream(intent.targetAgentType) };
+            }
+            if (decision.status === 'FALLBACK' && decision.selected_agent_type) {
+                const selectedAgentType = String(decision.selected_agent_type);
+                return { status: AvailabilityStatus.FALLBACK_TO_OTHER_AGENT_TYPE, streamName: QueueNames.ctrl_stream(selectedAgentType), selectedAgentType };
+            }
+            return this.reject(String(decision.reason || `Wakeup rejected for agent_type '${intent.targetAgentType}'`), 'AGENT_TYPE_UNAVAILABLE');
         }
-        if (decision.status === 'FALLBACK' && decision.selected_agent_type) {
-            const selectedAgentType = String(decision.selected_agent_type);
-            return { status: AvailabilityStatus.FALLBACK_TO_OTHER_AGENT_TYPE, streamName: QueueNames.ctrl_stream(selectedAgentType), selectedAgentType };
-        }
-        return this.reject(String(decision.reason || `Wakeup rejected for agent_type '${intent.targetAgentType}'`), 'AGENT_TYPE_UNAVAILABLE');
+        return this.reject(`Timed out waiting for worker wakeup for agent_type '${intent.targetAgentType}'`, 'AGENT_TYPE_UNAVAILABLE');
     }
 }

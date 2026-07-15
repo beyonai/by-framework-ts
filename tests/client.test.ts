@@ -124,6 +124,23 @@ describe('GatewayClient', () => {
             );
         });
 
+        it('should return the selected fallback AgentType', async () => {
+            mockRedis.get = jest.fn().mockImplementation((key: string) =>
+                key.includes('fallback:agent_type:cold-agent')
+                    ? Promise.resolve(JSON.stringify({ selected_agent_type: 'warm-agent' }))
+                    : Promise.resolve(null)
+            );
+            (client as any).registry.hasOnlineAgentType
+                .mockResolvedValueOnce([false, []])
+                .mockResolvedValueOnce([true, ['worker-warm']]);
+            const response = await client.sendMessage({
+                targetAgentType: 'cold-agent', sessionId: 'fallback-session', content: 'work',
+            });
+            expect(response.success).toBe(true);
+            expect(response.target_agent_type).toBe('warm-agent');
+            expect(mockRedis.xadd.mock.calls[0][0]).toBe(QueueNames.ctrl_stream('warm-agent'));
+        });
+
         it('should queue directly to worker stream when targetWorkerId is provided', async () => {
             const response = await client.sendMessage({
                 targetAgentType: 'demo-agent-ts',
