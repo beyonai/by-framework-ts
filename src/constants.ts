@@ -161,6 +161,11 @@ export class QueueNames {
     return versioned(`byai_gateway:task_group:${groupId}:results`, `task_group:{${groupId}}:results`);
   }
 
+  /** Plugin reload ACK stream: one worker's reload outcome per entry. */
+  static plugin_reload_ack_stream(reloadId: string): string {
+    return versioned(`byai_gateway:plugin_reload:${reloadId}:ack`, `plugin_reload:{${reloadId}}:ack`);
+  }
+
   // --- Trace observability keys ---
 
   /**
@@ -336,6 +341,7 @@ export const MSG_MAP_PREFIX = 'msg_map:';
 export const TASK_GROUP_FIELD_TOTAL = 'total';
 export const TASK_GROUP_FIELD_COMPLETED = 'completed';
 export const TASK_GROUP_FIELD_SOURCE_AGENT = 'source_agent_type';
+export const TASK_GROUP_FIELD_ABORTED = 'aborted';
 
 // --- Timing Constants ---
 /** Control loop sleep interval (seconds) */

@@ -1,5 +1,5 @@
 import { AgentConfig, normalizeAgentConfig } from './agent_config';
-import { Plugin, PluginBuildContext } from './plugin';
+import { AgentConfigsSnapshot, Plugin, PluginBuildContext, PluginReloadContext, PluginReloadResult } from './plugin';
 import type { AgentContext } from '../context';
 import type { GatewayWorker } from '../worker';
 import * as fs from 'fs/promises';
@@ -16,15 +16,39 @@ type HookStats = {
 
 type HookStatsSnapshotItem = HookStats & { avgMs: number; totalRuns: number };
 
+export interface ReloadStatus {
+    status: 'success' | 'failure';
+    reason: string;
+    versionBefore: number;
+    versionAfter: number;
+    error: string;
+}
+
 export class PluginRegistry {
     plugins: Plugin[] = [];
     logHookStatsOnShutdown = true;
     private agentConfigsInternal: AgentConfig[] = [];
+    private agentConfigsVersionInternal = 0;
     private initializedPlugins = new Set<string>();
     private hookStats = new Map<string, Map<string, HookStats>>();
+    private processedReloadIds = new Set<string>();
+    private reloadStatusById = new Map<string, ReloadStatus>();
 
     get agentConfigs(): AgentConfig[] {
         return [...this.agentConfigsInternal];
+    }
+
+    get agentConfigsVersion(): number {
+        return this.agentConfigsVersionInternal;
+    }
+
+    getAgentConfigsSnapshot(): AgentConfigsSnapshot {
+        return { version: this.agentConfigsVersionInternal, configs: [...this.agentConfigsInternal] };
+    }
+
+    getReloadStatus(reloadId: string): ReloadStatus | undefined {
+        const status = this.reloadStatusById.get(reloadId);
+        return status ? { ...status } : undefined;
     }
 
     private findAgentConfig(agentId: string): AgentConfig | undefined {
@@ -198,6 +222,7 @@ export class PluginRegistry {
 
     async initializePlugins(buildContext?: PluginBuildContext): Promise<void> {
         const context = buildContext ?? new PluginBuildContext(this.agentConfigs);
+        const configsBefore = this.agentConfigsInternal;
         for (const plugin of this.getActivePlugins()) {
             if (this.initializedPlugins.has(plugin.pluginId)) {
                 continue;
@@ -215,6 +240,88 @@ export class PluginRegistry {
             if (ok) {
                 this.initializedPlugins.add(plugin.pluginId);
             }
+        }
+        if (this.agentConfigsInternal !== configsBefore) {
+            this.agentConfigsVersionInternal += 1;
+        }
+    }
+
+    private static extractReloadConfigs(
+        result: AgentConfig[] | PluginReloadResult | null,
+        fallback: AgentConfig[]
+    ): AgentConfig[] {
+        if (result === null || result === undefined) {
+            return [...fallback];
+        }
+        if (Array.isArray(result)) {
+            return [...result];
+        }
+        return [...result.agentConfigs];
+    }
+
+    private async replayReloadChain(
+        baseSnapshot: AgentConfigsSnapshot,
+        reloadId: string,
+        reason: string
+    ): Promise<AgentConfig[]> {
+        const stableConfigs = baseSnapshot.configs;
+        let workingConfigs = [...stableConfigs];
+
+        for (const plugin of this.getActivePlugins()) {
+            const reloadContext: PluginReloadContext = {
+                pluginId: plugin.pluginId,
+                reloadId,
+                reason,
+                currentAgentConfigs: [...workingConfigs],
+                previousStableAgentConfigs: stableConfigs,
+                currentVersion: baseSnapshot.version,
+            };
+            const result = await plugin.reload(reloadContext);
+            workingConfigs = PluginRegistry.extractReloadConfigs(result, workingConfigs);
+            for (const config of workingConfigs) {
+                this.validateAgentConfig(config);
+            }
+        }
+
+        return workingConfigs;
+    }
+
+    /**
+     * Sequentially replay plugin reload hooks over the current stable version.
+     * Each plugin receives the current working AgentConfig list and may return
+     * the next full version. The stable version is only replaced after the
+     * whole chain succeeds (ADR-0001-adjacent hot-reload invariant).
+     */
+    async reloadPlugins(reloadId: string, reason: string = ''): Promise<AgentConfigsSnapshot> {
+        if (this.processedReloadIds.has(reloadId)) {
+            return this.getAgentConfigsSnapshot();
+        }
+
+        const baseSnapshot = this.getAgentConfigsSnapshot();
+        try {
+            const nextConfigs = await this.replayReloadChain(baseSnapshot, reloadId, reason);
+            this.agentConfigsInternal = nextConfigs;
+            this.agentConfigsVersionInternal += 1;
+            const nextSnapshot = this.getAgentConfigsSnapshot();
+            this.processedReloadIds.add(reloadId);
+            this.reloadStatusById.set(reloadId, {
+                status: 'success',
+                reason,
+                versionBefore: baseSnapshot.version,
+                versionAfter: nextSnapshot.version,
+                error: '',
+            });
+            return nextSnapshot;
+        } catch (error: any) {
+            this.processedReloadIds.add(reloadId);
+            this.reloadStatusById.set(reloadId, {
+                status: 'failure',
+                reason,
+                versionBefore: baseSnapshot.version,
+                versionAfter: this.agentConfigsVersionInternal,
+                error: String(error?.message || error),
+            });
+            throw error;
         }
     }
 
