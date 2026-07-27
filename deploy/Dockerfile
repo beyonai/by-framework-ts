@@ -6,8 +6,10 @@
 FROM node:20-alpine
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci
+# No package-lock.json is committed in this repo (see .gitignore), so
+# `npm ci` (which requires one) can't be used here.
+COPY package.json ./
+RUN npm install
 
 COPY tsconfig.json ./
 COPY src src

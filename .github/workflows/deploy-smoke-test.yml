@@ -16,7 +16,6 @@ on:
       - "examples/demo_worker.ts"
       - "examples/send_and_verify.ts"
       - "package.json"
-      - "package-lock.json"
       - ".github/workflows/deploy-smoke-test.yml"
   push:
     branches:
@@ -38,10 +37,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
+      # No package-lock.json is committed in this repo (see .gitignore), so
+      # neither setup-node's npm cache nor `npm ci` (both require a lockfile)
+      # can be used here.
       - name: Install dependencies (for the send_and_verify script below)
-        run: npm ci
+        run: npm install
 
       - name: Build and start Redis + Worker via deploy/docker-compose.yml
         run: docker compose -f deploy/docker-compose.yml up --build -d --wait --wait-timeout 90

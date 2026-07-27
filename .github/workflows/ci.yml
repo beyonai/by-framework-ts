@@ -14,9 +14,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
+      # No package-lock.json is committed in this repo (see .gitignore), so
+      # neither setup-node's npm cache nor `npm ci` (both require a lockfile)
+      # can be used here.
       - name: Install dependencies
-        run: npm ci
+        run: npm install
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Run tests
