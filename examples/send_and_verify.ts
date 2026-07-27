@@ -14,11 +14,36 @@ const SESSION_ID = 'smoke-test-session';
 const EXPECTED_FRAGMENT = 'Echo from TypeScript SDK:';
 const TIMEOUT_MS = 15_000;
 
+/**
+ * demo_worker.ts streams its reply one character at a time via
+ * `context.emitChunk({ content: char })`, so no single data-stream entry ever
+ * contains the full expected text — each entry's `data.choices[0].delta.content`
+ * is just one character. Reconstruct the full streamed text by concatenating
+ * every delta, oldest first, before checking for the expected fragment.
+ */
+function reconstructStreamedText(entries: ReadonlyArray<{ readonly data: string }>): string {
+    // readSessionDataStreamRev returns newest-first; replay oldest-first.
+    const chronological = [...entries].reverse();
+    let text = '';
+    for (const entry of chronological) {
+        try {
+            const payload = JSON.parse(entry.data);
+            const content = payload?.data?.choices?.[0]?.delta?.content;
+            if (typeof content === 'string') {
+                text += content;
+            }
+        } catch {
+            // skip unparseable entries
+        }
+    }
+    return text;
+}
+
 async function waitForEchoedReply(redis: ReturnType<typeof getRedis>): Promise<boolean> {
     const deadline = Date.now() + TIMEOUT_MS;
     while (Date.now() < deadline) {
-        const entries = await readSessionDataStreamRev(redis, SESSION_ID, 50);
-        if (entries.some((entry) => entry.data.includes(EXPECTED_FRAGMENT))) {
+        const entries = await readSessionDataStreamRev(redis, SESSION_ID, 200);
+        if (reconstructStreamedText(entries).includes(EXPECTED_FRAGMENT)) {
             return true;
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
