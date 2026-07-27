@@ -4,7 +4,7 @@ import { getRedis } from './redis_client';
 import { WorkerRegistry } from './registry';
 import { CancelSessionResponse, CancelTaskResponse, ExecutionStatus, SendMessageResponse } from './protocol/responses';
 import { ActionType } from './protocol/action_type';
-import { AskAgentCommand, BaseCommand, CancelTaskCommand, ResumeCommand } from './protocol/commands';
+import { AskAgentCommand, BaseCommand, CancelTaskCommand, ReloadPluginsCommand, ResumeCommand } from './protocol/commands';
 import { MessageHeader } from './protocol/message_header';
 import { QueueNames } from './constants';
 import { initializeQueuedExecution } from './dispatch/execution_init';
@@ -521,6 +521,71 @@ export class GatewayClient {
             cancelled_count: toCancel.length,
             already_finished_count: terminalExecutions.length,
         };
+    }
+
+    /** Fan out a plugin-reload command to all online workers of an agent type. */
+    async reloadPluginsForAgentType(params: {
+        agentType: string;
+        reason?: string;
+        reloadId?: string;
+        metadata?: Readonly<Record<string, unknown>>;
+    }): Promise<{ reloadId: string; agentType: string; workerIds: string[]; dispatchedCount: number }> {
+        const reason = params.reason || '';
+        const reloadId = params.reloadId || `reload-${uuidv4().slice(0, 8)}`;
+
+        const [hasOnline, workerIds] = await this.registry.hasOnlineAgentType(params.agentType);
+        if (!hasOnline || workerIds.length === 0) {
+            return { reloadId, agentType: params.agentType, workerIds: [], dispatchedCount: 0 };
+        }
+
+        for (const workerId of workerIds) {
+            const command = new ReloadPluginsCommand(
+                new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, `reload:${params.agentType}`, uuidv4().replace(/-/g, ''), {
+                    targetAgentType: params.agentType,
+                    metadata: params.metadata || {},
+                }),
+                reloadId,
+                reason
+            );
+            await this.redis.xadd(
+                QueueNames.worker_ctrl_stream(workerId),
+                '*',
+                'data',
+                JSON.stringify(command.toDict())
+            );
+        }
+
+        return { reloadId, agentType: params.agentType, workerIds: [...workerIds], dispatchedCount: workerIds.length };
+    }
+
+    /** Read reload ACK payloads from the ACK stream for a given reload id. */
+    async collectReloadAcks(
+        reloadId: string,
+        lastId: string = '0-0',
+        blockMs: number = 0,
+        count: number = 100
+    ): Promise<Record<string, unknown>[]> {
+        const stream = QueueNames.plugin_reload_ack_stream(reloadId);
+        const messages = await (this.redis.xread as any)('COUNT', count, 'BLOCK', blockMs, 'STREAMS', stream, lastId);
+
+        const results: Record<string, unknown>[] = [];
+        if (!messages?.length) {
+            return results;
+        }
+        for (const [, entries] of messages) {
+            for (const [, fields] of entries as [string, unknown[]][]) {
+                const dataIndex = (fields as unknown[]).findIndex((field) => field === 'data');
+                if (dataIndex < 0) {
+                    continue;
+                }
+                try {
+                    results.push(JSON.parse(String((fields as unknown[])[dataIndex + 1])));
+                } catch {
+                    // skip invalid JSON
+                }
+            }
+        }
+        return results;
     }
 
     async sendMessage(params: SendMessageParams): Promise<SendMessageResponse> {

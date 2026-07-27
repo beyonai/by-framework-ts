@@ -7,11 +7,12 @@ import { GatewayCommand, ResumeCommand, AskAgentCommand } from './protocol/comma
 import { AgentState, isTerminalState } from './protocol/agent_state';
 import { EventType } from './protocol/event_type';
 import { AgentContext, TaskCancelledError } from './context';
-import { QueueNames, RegistryKeys, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED } from './constants';
+import { QueueNames, RegistryKeys, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_FIELD_ABORTED } from './constants';
 import { WorkerRegistry } from './registry';
 import { WorkerHeartbeat } from './heartbeat';
 import { MessageHeader } from './protocol/message_header';
 import { JsonValue, ProcessCommandResult, WireContent, normalizeProcessResult, AgentTaskResult } from './protocol/results';
+import { ContentCodec } from './protocol/content_codec';
 import { PluginRegistry } from './extensions/registry';
 import { HistoryProvider } from './history';
 import { WorkspaceManager } from './workspace';
@@ -86,6 +87,25 @@ export abstract class GatewayWorker {
         console.log(`[${this.workerId}] Received cancel request`);
     }
 
+    /** Content codec used to decode inbound commands before processCommand runs. Default: none. */
+    protected getContentCodec(): ContentCodec | undefined {
+        return undefined;
+    }
+
+    /** AgentContext subclass to construct per message. Default: AgentContext itself. */
+    protected getContextClass(): typeof AgentContext {
+        return AgentContext;
+    }
+
+    /**
+     * Hook run on every inbound command before processCommand sees it. Default: identity
+     * passthrough. Subclasses (e.g. ByaiWorker) override this to decode wire content into
+     * domain objects using getContentCodec().
+     */
+    protected prepareCommandForProcessing(command: GatewayCommand): GatewayCommand {
+        return command;
+    }
+
     async startHeartbeat(
         lifecycleCallback?: (lifecycle: string) => void,
         denylistRefresh?: (denied: Set<string>) => void,
@@ -116,11 +136,13 @@ export abstract class GatewayWorker {
     }
 
     async handleMessage(
-        command: GatewayCommand,
+        rawCommand: GatewayCommand,
         options: HandleMessageOptions = {}
     ): Promise<AgentTaskResult> {
+        let command = this.prepareCommandForProcessing(rawCommand);
         const traceId = command.header.traceId || uuidv4().replace(/-/g, '');
-        const context = new AgentContext(
+        const ContextClass = this.getContextClass();
+        const context = new ContextClass(
             command.header.sessionId,
             traceId,
             this.redis,
@@ -160,8 +182,8 @@ export abstract class GatewayWorker {
 
         try {
             await this.pluginRegistry.onTaskStart(context);
-            if (!isResume && command instanceof AskAgentCommand) {
-                await HistoryProvider.saveMessage(command.header.sessionId, 'user', command.content as any, {
+            if (!isResume && rawCommand instanceof AskAgentCommand) {
+                await HistoryProvider.saveMessage(command.header.sessionId, 'user', rawCommand.content as any, {
                     message_id: command.header.messageId,
                     trace_id: command.header.traceId,
                 });
@@ -188,14 +210,20 @@ export abstract class GatewayWorker {
 
             if (isResume) {
                 // Persist agent return state
-                await this.persistAgentReturnState(workspacePaths, command);
+                await this.persistAgentReturnState(workspacePaths, rawCommand);
 
-                // Check for scatter-gather join
+                // Check for Task Group Join (ADR-0001)
                 if (command.header.taskGroupId) {
                     const groupKey = QueueNames.task_group(command.header.taskGroupId);
                     const resultsKey = QueueNames.task_group_results(command.header.taskGroupId);
                     const totalStr = await this.redis.hget(groupKey, TASK_GROUP_FIELD_TOTAL);
                     if (totalStr !== null) {
+                        const aborted = await this.redis.hget(groupKey, TASK_GROUP_FIELD_ABORTED);
+                        if (aborted) {
+                            console.warn(`[${this.workerId}] TaskGroup ${command.header.taskGroupId} is aborted, discarding late reply from message_id=${command.header.messageId}`);
+                            return new AgentTaskResult({ status: `${AgentState.CANCELLED}: group_aborted` });
+                        }
+
                         // Store result in Redis Hash for distributed access
                         const resultData = {
                             status: (command as ResumeCommand).status,
@@ -213,6 +241,23 @@ export abstract class GatewayWorker {
                             return new AgentTaskResult({ status: `${AgentState.QUEUED}: waiting_for_group` });
                         }
                         console.log(`[${this.workerId}] TaskGroup ${command.header.taskGroupId} ALL COMPLETED (${totalStr})!`);
+
+                        // Group Join: resume the caller with the aggregate of every
+                        // member's result, never a single arbitrary member's reply.
+                        const rawResults = await this.redis.hgetall(resultsKey);
+                        const aggregatedResults = Object.entries(rawResults).map(([msgId, data]) => ({
+                            message_id: msgId,
+                            ...JSON.parse(data),
+                        }));
+                        if (command instanceof ResumeCommand) {
+                            command = new ResumeCommand(
+                                command.header,
+                                command.content,
+                                command.status,
+                                aggregatedResults,
+                                command.extraPayload
+                            );
+                        }
                     }
                 }
                 await context.emitState({ state: AgentState.RESUMED });
