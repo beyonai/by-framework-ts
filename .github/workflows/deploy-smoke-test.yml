@@ -1,0 +1,59 @@
+name: Deploy Smoke Test
+
+# Validates deploy/'s Dockerfile + docker-compose.yml actually deliver a
+# message through the full pipeline - client sends -> Redis control stream
+# -> Worker consumes -> Worker replies -> Redis data stream -> client reads
+# - using examples/demo_worker.ts (built into the worker container from
+# THIS commit's source, not the last npm release) and
+# examples/send_and_verify.ts (run on the host runner against the same
+# Redis, published on localhost:6379 by docker-compose).
+
+on:
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "src/**"
+      - "examples/demo_worker.ts"
+      - "examples/send_and_verify.ts"
+      - "package.json"
+      - ".github/workflows/deploy-smoke-test.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/**"
+      - "src/**"
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    env:
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # No package-lock.json is committed in this repo (see .gitignore), so
+      # neither setup-node's npm cache nor `npm ci` (both require a lockfile)
+      # can be used here.
+      - name: Install dependencies (for the send_and_verify script below)
+        run: npm install
+
+      - name: Build and start Redis + Worker via deploy/docker-compose.yml
+        run: docker compose -f deploy/docker-compose.yml up --build -d --wait --wait-timeout 90
+
+      - name: Send a message and verify the Worker echoes it back
+        run: npx ts-node examples/send_and_verify.ts
+
+      - name: Worker logs
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml logs worker
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
