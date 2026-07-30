@@ -13,9 +13,11 @@ class MockRedis {
     private setStorage: Map<string, string[]> = new Map([
         ['agent_type:workers:demo-agent-ts', ['worker-123']],
     ]);
-    wakeupDecision: Record<string, unknown> | null = null;
-    wakeupDecisions: Record<string, unknown>[] = [];
     onlineAfterWakeup = '';
+    onlineAfterWakeupChecks = 1;
+    xreadCalls = 0;
+    private wakeupPublished = false;
+    private wakeupOnlineChecks = 0;
 
     setValue(key: string, value: Record<string, unknown>): void {
         this.storage.set(key, JSON.stringify(value));
@@ -30,6 +32,9 @@ class MockRedis {
             throw new Error('unexpected field');
         }
         this.calls.push({ name, payload });
+        if (name === QueueNames.control_plane_wakeup_stream()) {
+            this.wakeupPublished = true;
+        }
         return '1-0';
     }
 
@@ -44,6 +49,12 @@ class MockRedis {
     async smembers(key: string): Promise<string[]> {
         // Match key patterns like "byai_gateway:registry:agent_type:workers:demo-agent-ts"
         const matchKey = key.replace(/^byai_gateway:registry:/, '');
+        if (this.wakeupPublished && matchKey === `agent_type:workers:${this.onlineAfterWakeup}`) {
+            this.wakeupOnlineChecks += 1;
+            if (this.wakeupOnlineChecks >= this.onlineAfterWakeupChecks) {
+                this.setOnline(this.onlineAfterWakeup);
+            }
+        }
         return this.setStorage.get(matchKey) || [];
     }
 
@@ -70,10 +81,8 @@ class MockRedis {
     }
 
     async xread(..._args: unknown[]): Promise<unknown> {
-        const decision = this.wakeupDecisions.shift() || this.wakeupDecision;
-        if (!decision) return null;
-        if (this.onlineAfterWakeup) this.setOnline(this.onlineAfterWakeup);
-        return [['result-stream', [[`${Date.now()}-0`, ['data', JSON.stringify(decision)]]]]];
+        this.xreadCalls += 1;
+        throw new Error('WAKE_AND_WAIT must not read the wakeup result stream');
     }
 
     async hgetall(key: string): Promise<Record<string, string> | null> {
@@ -216,9 +225,8 @@ describe('AgentContext data message format', () => {
         ]);
     });
 
-    test('callAgent WAKE_AND_WAIT publishes only after READY and membership recheck', async () => {
+    test('callAgent WAKE_AND_WAIT publishes after the target agent type becomes online', async () => {
         const redis = new MockRedis();
-        redis.wakeupDecision = { status: 'READY' };
         redis.onlineAfterWakeup = 'cold-agent';
         const ctx = new AgentContext('sess-ww', 'trace-ww', redis as any, 'caller', 'parent');
         const result = await ctx.callAgent({
@@ -229,19 +237,21 @@ describe('AgentContext data message format', () => {
         expect(redis.calls.map(call => call.name)).toEqual([
             QueueNames.control_plane_wakeup_stream(), QueueNames.ctrl_stream('cold-agent'),
         ]);
+        expect(redis.xreadCalls).toBe(0);
     });
 
-    test('callAgent WAKE_AND_WAIT continues through STARTING until READY', async () => {
+    test('callAgent WAKE_AND_WAIT keeps polling until the target agent type becomes online', async () => {
         const redis = new MockRedis();
-        redis.wakeupDecisions = [{ status: 'STARTING' }, { status: 'READY' }];
         redis.onlineAfterWakeup = 'cold-agent';
+        redis.onlineAfterWakeupChecks = 2;
         const ctx = new AgentContext('sess-start', 'trace-start', redis as any, 'caller', 'parent');
         const result = await ctx.callAgent({
             targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.WAKE_AND_WAIT,
-            availabilityTimeoutMs: 50,
+            availabilityTimeoutMs: 250,
         });
         expect(result.status).toBe('QUEUED');
         expect(redis.calls.at(-1)?.name).toBe(QueueNames.ctrl_stream('cold-agent'));
+        expect(redis.xreadCalls).toBe(0);
     });
 
     test('callAgent rejects an unsupported policy even when the AgentType is online', async () => {
@@ -298,11 +308,12 @@ describe('AgentContext data message format', () => {
         const ctx = new AgentContext('sess-timeout', 'trace-timeout', redis as any, 'caller', 'parent');
         const result = await ctx.callAgent({
             targetAgentType: 'cold-agent', content: 'work', routePolicy: RoutePolicy.WAKE_AND_WAIT,
-            availabilityTimeoutMs: 0,
+            availabilityTimeoutMs: 10,
         });
         expect(result.status).toBe('FAILED');
         expect(result.error_code).toBe('AGENT_TYPE_UNAVAILABLE');
         expect(redis.calls.map(call => call.name)).toEqual([QueueNames.control_plane_wakeup_stream()]);
+        expect(redis.xreadCalls).toBe(0);
     });
 
     test('isCancelRequested is false by default', () => {

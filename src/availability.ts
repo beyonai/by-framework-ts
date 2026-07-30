@@ -44,15 +44,11 @@ export interface AvailabilityResult {
     errorCode?: string;
 }
 
+const WAKEUP_ONLINE_POLL_INTERVAL_MS = 100;
+
 function parseJson(raw: string | null): Record<string, any> | null {
     if (!raw) return null;
     try { return JSON.parse(raw); } catch { return null; }
-}
-
-function asString(value: unknown): string | null {
-    if (typeof value === 'string') return value;
-    if (Buffer.isBuffer(value)) return value.toString('utf8');
-    return null;
 }
 
 export class AvailabilityRouter {
@@ -132,30 +128,19 @@ export class AvailabilityRouter {
     }
     private async wakeAndWait(intent: DeliveryIntent): Promise<AvailabilityResult> {
         await this.publishWakeup(intent);
-        const resultStream = QueueNames.control_plane_wakeup_result_stream(intent.executionId);
         const timeout = Math.max(0, intent.timeoutMs ?? 30000);
         if (timeout === 0) return this.reject(`Timed out waiting for worker wakeup for agent_type '${intent.targetAgentType}'`, 'AGENT_TYPE_UNAVAILABLE');
         const deadline = Date.now() + timeout;
-        let lastId = '0-0';
         while (Date.now() < deadline) {
-            const remaining = Math.max(1, deadline - Date.now());
-            const messages = await (this.redis.xread as any)('COUNT', 1, 'BLOCK', remaining, 'STREAMS', resultStream, lastId);
-            if (!messages?.length) break;
-            const entry = messages[0][1][0];
-            lastId = asString(entry[0]) || lastId;
-            const fields: unknown[] = entry[1];
-            const dataIndex = fields.findIndex(field => asString(field) === 'data');
-            const decision = parseJson(dataIndex >= 0 ? asString(fields[dataIndex + 1]) : null);
-            if (!decision || (decision.execution_id && decision.execution_id !== intent.executionId)) continue;
-            if (decision.status === 'STARTING' || decision.status === 'QUEUED') continue;
-            if (decision.status === 'READY' && (await this.registry.hasOnlineAgentType(intent.targetAgentType))[0]) {
+            if ((await this.registry.hasOnlineAgentType(intent.targetAgentType))[0]) {
                 return { status: AvailabilityStatus.WAIT_AND_DELIVER, streamName: QueueNames.ctrl_stream(intent.targetAgentType) };
             }
-            if (decision.status === 'FALLBACK' && decision.selected_agent_type) {
-                const selectedAgentType = String(decision.selected_agent_type);
-                return { status: AvailabilityStatus.FALLBACK_TO_OTHER_AGENT_TYPE, streamName: QueueNames.ctrl_stream(selectedAgentType), selectedAgentType };
+
+            // Avoid a tight loop while waiting for the worker to register its online lease.
+            const remaining = deadline - Date.now();
+            if (remaining > 0) {
+                await new Promise(resolve => setTimeout(resolve, Math.min(WAKEUP_ONLINE_POLL_INTERVAL_MS, remaining)));
             }
-            return this.reject(String(decision.reason || `Wakeup rejected for agent_type '${intent.targetAgentType}'`), 'AGENT_TYPE_UNAVAILABLE');
         }
         return this.reject(`Timed out waiting for worker wakeup for agent_type '${intent.targetAgentType}'`, 'AGENT_TYPE_UNAVAILABLE');
     }
