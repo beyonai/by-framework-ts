@@ -1,6 +1,6 @@
 import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_TTL_SECONDS } from './constants';
+import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_FIELD_ABORTED, TASK_GROUP_TTL_SECONDS } from './constants';
 import { createRedisCallAgentDeps, callAgent as publishCallAgent } from './dispatch/dispatch_ask_agent';
 import { RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
 import type { CallAgentPublishInput } from './dispatch/types';
@@ -64,7 +64,7 @@ interface DispatchedTask {
     target_agent_type: string;
 }
 
-interface DispatchGroupResult {
+export interface DispatchGroupResult {
     status: string;
     taskGroupId: string;
     dispatchedTasks: DispatchedTask[];
@@ -424,9 +424,11 @@ export class AgentContext {
     }
 
     /**
-     * Dispatch multiple tasks concurrently as a group (Scatter-Gather).
+     * Dispatch multiple tasks concurrently as a Task Group — call_agent's plural.
+     * The caller is resumed with every task's result, aggregated, only once every
+     * task in the group has completed (see Group Join handling in worker.ts).
      */
-    async dispatchGroup(params: {
+    async callAgents(params: {
         readonly tasks: ReadonlyArray<{
             readonly targetAgentType: string;
             readonly content: string;
@@ -531,6 +533,12 @@ export class AgentContext {
                 if (this.pluginRegistry) {
                     await this.pluginRegistry.onCallAgentError(this, command, error instanceof Error ? error : new Error(String(error)));
                 }
+                // A genuine dispatch-time failure partway through fan-out: mark the
+                // group Aborted so already-sent siblings' replies don't later resume
+                // this (now-failed) caller execution (ADR-0001).
+                if (wait) {
+                    await this.redis.hset(QueueNames.task_group(taskGroupId), TASK_GROUP_FIELD_ABORTED, '1');
+                }
                 throw error;
             }
 
@@ -594,6 +602,17 @@ export class AgentContext {
             taskGroupId,
             dispatchedTasks,
         };
+    }
+
+    /**
+     * Alias for callAgents, kept permanently for source compatibility.
+     *
+     * Not deprecated: shares callAgents' implementation and behavior
+     * completely — there is no behavioral fork between the two names,
+     * only a naming one (ADR-0001).
+     */
+    async dispatchGroup(params: Parameters<AgentContext['callAgents']>[0]): Promise<DispatchGroupResult> {
+        return this.callAgents(params);
     }
 
     /**

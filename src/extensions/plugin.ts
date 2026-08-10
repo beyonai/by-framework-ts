@@ -38,6 +38,31 @@ export interface PluginManifest {
     enabled?: boolean;
 }
 
+/** Immutable view of a stable AgentConfig collection version. */
+export interface AgentConfigsSnapshot {
+    readonly version: number;
+    readonly configs: ReadonlyArray<AgentConfig>;
+}
+
+/**
+ * Context passed to plugin reload hooks. currentAgentConfigs is the working
+ * config list for the current reload stage; plugins transform it and return
+ * the next full config version.
+ */
+export interface PluginReloadContext {
+    readonly pluginId: string;
+    readonly reloadId: string;
+    readonly reason: string;
+    readonly currentAgentConfigs: ReadonlyArray<AgentConfig>;
+    readonly previousStableAgentConfigs: ReadonlyArray<AgentConfig>;
+    readonly currentVersion: number;
+}
+
+/** Optional structured result for reload workflows. */
+export interface PluginReloadResult {
+    readonly agentConfigs: ReadonlyArray<AgentConfig>;
+}
+
 export class PluginBuildContext {
     private prevAgentConfigs: ReadonlyArray<AgentConfig> = [];
     constructor(private agentConfigs: AgentConfig[] = []) {}
@@ -93,6 +118,16 @@ export abstract class Plugin {
     }
 
     abstract registerAgentConfigs(buildContext: PluginBuildContext): Promise<AgentConfig[] | null>;
+
+    /**
+     * Transform the current stable config chain into the next version.
+     * Default is a no-op passthrough so existing plugins remain compatible;
+     * plugins that support hot reload override this to return the next full
+     * AgentConfig list for the current reload stage.
+     */
+    async reload(context: PluginReloadContext): Promise<AgentConfig[] | PluginReloadResult | null> {
+        return [...context.currentAgentConfigs];
+    }
 
     async onWorkerStartup(_worker: GatewayWorker): Promise<void> {}
     async onWorkerShutdown(_worker: GatewayWorker): Promise<void> {}

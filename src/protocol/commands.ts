@@ -264,6 +264,42 @@ export class EvictWorkerCommand extends BaseCommand {
     }
 }
 
+export class ReloadPluginsCommand extends BaseCommand {
+    static actionType = ActionType.RELOAD_PLUGINS;
+    readonly actionType = ActionType.RELOAD_PLUGINS;
+
+    constructor(
+        public readonly header: MessageHeader,
+        public readonly reloadId: string,
+        public readonly reason: string = ''
+    ) {
+        super(header);
+        if (!reloadId) {
+            throw new Error('ReloadPluginsCommand requires reloadId');
+        }
+    }
+
+    toDict(): Readonly<Record<string, unknown>> {
+        return {
+            action_type: this.actionType,
+            header: this.header.toDict(),
+            body: {
+                reload_id: this.reloadId,
+                reason: this.reason,
+            },
+        };
+    }
+
+    static fromDict(data: Readonly<Record<string, unknown>>): ReloadPluginsCommand {
+        const body = { ...(data.body as Record<string, unknown> || {}) };
+        return new ReloadPluginsCommand(
+            MessageHeader.fromDict(data.header as Record<string, unknown>),
+            (body.reload_id as string) || '',
+            (body.reason as string) || ''
+        );
+    }
+}
+
 export type GatewayCommand = BaseCommand;
 export type CommandConstructor<T extends BaseCommand = BaseCommand> = {
     actionType: string;
@@ -302,3 +338,4 @@ registerCommand(CancelTaskCommand);
 registerCommand(SuspendWorkerCommand);
 registerCommand(ResumeWorkerCommand);
 registerCommand(EvictWorkerCommand);
+registerCommand(ReloadPluginsCommand);

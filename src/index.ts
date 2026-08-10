@@ -9,6 +9,9 @@ export * from './protocol/results';
 export * from './protocol/data_message';
 export * from './protocol/message';
 export * from './protocol/content_type';
+export { ContentCodec } from './protocol/content_codec';
+export * from './protocol/byai_codec';
+export * from './protocol/byai_command';
 
 export * from './redis_client';
 export * from './redis_cluster_scan';
@@ -30,6 +33,8 @@ export * from './sandbox';
 export * from './app';
 export * from './interceptors';
 export * from './byai_client';
+export * from './byai_worker';
+export * from './byai_context';
 export * from './extensions';
 export * from './exceptions';
 export * from './runtime';

@@ -4,8 +4,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { getRedis, createRedis } from './redis_client';
 import { GatewayWorker } from './worker';
 import { QueueNames, ConsumerGroups, STREAM_READ_LAST_ID } from './constants';
-import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand, ResumeCommand, ResumeWorkerCommand, SuspendWorkerCommand, commandFromDict } from './protocol/commands';
+import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand, ReloadPluginsCommand, ResumeCommand, ResumeWorkerCommand, SuspendWorkerCommand, commandFromDict } from './protocol/commands';
 import { WorkerRegistry } from './registry';
+import type { ReloadStatus } from './extensions/registry';
 import { HistoryProvider } from './history';
 import { AgentState } from './protocol/agent_state';
 import { SpanRecorder, TraceSpan } from './trace/span_recorder';
@@ -649,6 +650,11 @@ export class WorkerRunner {
                 return;
             }
 
+            if (command instanceof ReloadPluginsCommand) {
+                await this._handleReloadPlugins(command);
+                return;
+            }
+
             if (!(command instanceof CancelTaskCommand)) {
                 return;
             }
@@ -675,6 +681,49 @@ export class WorkerRunner {
         } finally {
             await this.redis.xack(streamName, this.groupName, msgId);
         }
+    }
+
+    private async _handleReloadPlugins(command: ReloadPluginsCommand): Promise<void> {
+        const pluginRegistry = this.worker.pluginRegistry;
+        const versionBefore = pluginRegistry.agentConfigsVersion;
+        const statusPayload: Record<string, unknown> = {
+            reload_id: command.reloadId,
+            worker_id: this.worker.workerId,
+            status: 'failure',
+            reason: command.reason,
+            version_before: versionBefore,
+            version_after: versionBefore,
+            error: '',
+        };
+
+        try {
+            await pluginRegistry.reloadPlugins(command.reloadId, command.reason);
+        } catch (error: any) {
+            if (!pluginRegistry.getReloadStatus(command.reloadId)) {
+                statusPayload.error = String(error?.message || error);
+            }
+            console.error(`[${this.worker.workerId}] Plugin reload ${command.reloadId} failed:`, error);
+        }
+
+        this._applyRecordedReloadStatus(statusPayload, pluginRegistry.getReloadStatus(command.reloadId));
+        await this._publishReloadAck(command.reloadId, statusPayload);
+    }
+
+    private _applyRecordedReloadStatus(statusPayload: Record<string, unknown>, recorded?: ReloadStatus): void {
+        if (!recorded) return;
+        statusPayload.status = recorded.status;
+        statusPayload.version_before = recorded.versionBefore;
+        statusPayload.version_after = recorded.versionAfter;
+        statusPayload.error = recorded.error;
+    }
+
+    private async _publishReloadAck(reloadId: string, statusPayload: Record<string, unknown>): Promise<void> {
+        await this.redis.xadd(
+            QueueNames.plugin_reload_ack_stream(reloadId),
+            '*',
+            'data',
+            JSON.stringify(statusPayload)
+        );
     }
 
     async start(options: { handleSignals?: boolean } = {}): Promise<void> {
