@@ -194,19 +194,61 @@ const child = await context.callAgent({
 });
 ```
 
-也支持 Scatter-Gather：
+也支持 Scatter-Gather。`callAgents` 是 `callAgent` 的复数形式：每个子任务的行为与等价的单次
+`callAgent` 完全一致，区别只在于所有子任务完成后，调用方被**一次性**唤醒并拿到全部结果。
+`dispatchGroup` 是它的永久别名，不是废弃 API。
 
 ```typescript
-const group = await context.dispatchGroup({
+const group = await context.callAgents({
     tasks: [
         { targetAgentType: 'agent-a', content: 'task A' },
         { targetAgentType: 'agent-b', content: 'task B' },
     ],
     waitForReply: true,
 });
-
-const results = await context.collectGroupResults(group.taskGroupId, 30);
+// { status: 'QUEUED', taskGroupId: 'tg-...', dispatchedTasks: [...] }
 ```
+
+Worker 收到的 `ResumeCommand` 中，`replyData` 是按派发顺序排列的聚合结果，每个子任务一条：
+
+```typescript
+async processCommand(command, context) {
+    if (command instanceof ResumeCommand) {
+        for (const item of command.replyData as any[]) {
+            console.log(item.target_agent_type, item.status, item.content);
+        }
+        // 组恢复时 command.content 为 ''：replyData 是唯一的聚合通道
+        return { status: 'completed', content: summarize(command.replyData) };
+    }
+}
+```
+
+`collectGroupResults(taskGroupId, timeout?)` 仍可用于在 resume 之外轮询同一批结果，顺序一致。
+
+每个子任务都可以带上 `callAgent` 的全部参数，默认值也一致：
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `targetAgentType` | — | 必填 |
+| `content` | — | 任意可 JSON 序列化的值 |
+| `extraPayload`、`metadata` | `{}` | |
+| `messageId` | 自动生成 | 需逐任务传入；整批不能共用一个（结果按子任务键存储） |
+| `routePolicy` | `FAIL_FAST` | `SEND_ANYWAY` 可把消息排入尚未启动的 agent type |
+| `availabilityTimeoutMs` | `30000` | |
+| `region`、`priority` | — 、`0` | |
+
+几点行为需要知道：
+
+- 目标不可用**只让该任务失败** —— 它会作为一条 `FAILED` 记录进入聚合结果（带
+  `reply_data.error_code`），其余任务照常派发。
+- `callAgents({ tasks: [] })` 抛错，不再返回一个空操作结果。
+- 派发过程中的基础设施故障会把该组标记为 aborted；迟到的兄弟回包被丢弃，不会去唤醒一个已经失败的
+  调用方执行。
+
+**升级注意**：Task Group 的状态契约带版本号（见
+`by-framework-python/docs/adr/0001-unify-call-agent-and-call-agents-behavior.md`）。
+新 Worker 能按旧语义处理旧组，但旧 Worker 无法反向兼容 ——
+**升级混合部署的 worker 池前，必须排空进行中的 task group，或者整池一次性重启。**
 
 ## 核心 API
 
@@ -387,7 +429,8 @@ Worker 基类会自动处理：
 | `emitArtifact(event, eventType?)` | 推送文件产物 |
 | `askUser(event)` | 向用户请求输入，并将当前任务标记为等待用户 |
 | `callAgent(params)` | 调用单个下游 Agent |
-| `dispatchGroup(params)` | 并发派发多个下游任务 |
+| `callAgents(params)` | 并发派发多个下游任务；调用方在全部完成后被一次性唤醒，拿到有序聚合结果 |
+| `dispatchGroup(params)` | `callAgents` 的永久别名 |
 | `collectGroupResults(taskGroupId, timeout?)` | 收集任务组结果 |
 | `checkCancelled()` | 若任务已取消则抛出 `TaskCancelledError` |
 | `isCancelRequested()` | 查询取消信号 |

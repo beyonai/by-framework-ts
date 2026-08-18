@@ -333,9 +333,28 @@ export const EXEC_FIELD_PREFIX = 'exec:';
 export const MSG_MAP_PREFIX = 'msg_map:';
 
 // --- Task Group Hash Fields ---
+// These names are a CROSS-RUNTIME wire contract: the Python and Java SDKs read
+// and write the same hash. Do not rename or repurpose without changing all
+// three. Full contract: by-framework-python/docs/adr/0001-unify-call-agent-and-
+// call-agents-behavior.md
 export const TASK_GROUP_FIELD_TOTAL = 'total';
 export const TASK_GROUP_FIELD_COMPLETED = 'completed';
 export const TASK_GROUP_FIELD_SOURCE_AGENT = 'source_agent_type';
+/** Set once dispatch fails partway through a batch; replies for an aborted
+ *  group are discarded instead of resuming the already-terminated caller. */
+export const TASK_GROUP_FIELD_ABORTED = 'aborted';
+/** Task Group protocol version, stamped by the dispatcher. ABSENT means the
+ *  group was written by a pre-v2 dispatcher — Group Join must then fall back to
+ *  the legacy behaviour (results keyed by the reply's own messageId, no
+ *  aggregation), so a rolling upgrade cannot reinterpret an in-flight group. */
+export const TASK_GROUP_FIELD_PROTOCOL_VERSION = 'protocol_version';
+/** JSON array of the group's sub-task dispatch message ids, in dispatch order.
+ *  Group Join aggregates in this order and uses it to name results that never
+ *  arrived rather than silently returning a short list. */
+export const TASK_GROUP_FIELD_TASK_ORDER = 'task_order';
+/** Version 2: per-sub-task result keys, ordered aggregation into the caller's
+ *  replyData, and content cleared on group resume. */
+export const TASK_GROUP_PROTOCOL_V2 = '2';
 
 // --- Timing Constants ---
 /** Control loop sleep interval (seconds) */

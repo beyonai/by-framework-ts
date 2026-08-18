@@ -1,12 +1,12 @@
 import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_TTL_SECONDS } from './constants';
+import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_FIELD_SOURCE_AGENT, TASK_GROUP_FIELD_ABORTED, TASK_GROUP_FIELD_PROTOCOL_VERSION, TASK_GROUP_FIELD_TASK_ORDER, TASK_GROUP_PROTOCOL_V2, TASK_GROUP_ID_PREFIX, TASK_GROUP_TTL_SECONDS } from './constants';
 import { createRedisCallAgentDeps, callAgent as publishCallAgent } from './dispatch/dispatch_ask_agent';
 import { RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
-import type { CallAgentPublishInput } from './dispatch/types';
+import type { CallAgentPublishInput, CallAgentPublishResult } from './dispatch/types';
 import { EventType } from './protocol/event_type';
 import { AgentState } from './protocol/agent_state';
-import { AskAgentCommand } from './protocol/commands';
+import { AskAgentCommand, ResumeCommand } from './protocol/commands';
 import { MessageHeader } from './protocol/message_header';
 import {
     StateChangeEvent,
@@ -20,6 +20,7 @@ import { AgentConfig } from './extensions/agent_config';
 import type { PluginRegistry } from './extensions/registry';
 import { HistoryProvider } from './history';
 import { SpanRecorder, spanIdHex, TraceSpan } from './trace/span_recorder';
+import type { JsonValue } from './protocol/results';
 
 export class TaskCancelledError extends Error {
     constructor(message: string = 'task cancelled') {
@@ -59,9 +60,29 @@ export interface CallAgentParams {
     readonly priority?: number;
 }
 
+/**
+ * One task in a callAgents batch. Mirrors CallAgentParams minus waitForReply
+ * (batch-level), so a group member can be routed exactly like a single call.
+ */
+export interface CallAgentsTask {
+    readonly targetAgentType: string;
+    readonly content: unknown;
+    readonly extraPayload?: Readonly<Record<string, unknown>>;
+    /** @deprecated Use extraPayload. */
+    readonly payload?: Readonly<Record<string, unknown>>;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly messageId?: string;
+    readonly routePolicy?: RoutePolicyType;
+    readonly availabilityTimeoutMs?: number;
+    readonly region?: string;
+    readonly priority?: number;
+}
+
 interface DispatchedTask {
     message_id: string;
     target_agent_type: string;
+    status?: string;
+    reply_data?: unknown;
 }
 
 interface DispatchGroupResult {
@@ -84,6 +105,15 @@ export class AgentContext {
     private responseBuffer: ReadonlyArray<string> = [];
     private historySaved = false;
     private _isSuspended = false;
+    /**
+     * Task Group sub-tasks that never reached a worker (their target agent type
+     * was unavailable at dispatch time). Each is a fully-formed ResumeCommand
+     * addressed back at this caller, so Group Join counts and aggregates it
+     * exactly like a real sub-agent's failure reply. GatewayWorker flushes these
+     * AFTER processCommand returns — see flushPendingGroupReplies for why not
+     * inline.
+     */
+    private readonly _pendingGroupReplies: ResumeCommand[] = [];
     private _permissionTransferred = false;
     private _isStreamFinished = false;
 
@@ -426,13 +456,20 @@ export class AgentContext {
     /**
      * Dispatch multiple tasks concurrently as a group (Scatter-Gather).
      */
-    async dispatchGroup(params: {
-        readonly tasks: ReadonlyArray<{
-            readonly targetAgentType: string;
-            readonly content: string;
-            readonly payload?: Readonly<Record<string, unknown>>;
-            readonly metadata?: Readonly<Record<string, unknown>>;
-        }>;
+    /**
+     * Dispatch multiple tasks concurrently as a Task Group — callAgent's plural.
+     *
+     * Every per-call option callAgent takes is accepted per task, with the same
+     * defaults, so a task that names no routing options behaves exactly like the
+     * equivalent single callAgent call. The only increment is that the caller is
+     * resumed once, with every task's result aggregated in dispatch order, after
+     * all of them complete. On that resume `replyData` is the aggregate and
+     * `content` is `''`.
+     *
+     * Contract: by-framework-python/docs/adr/0001-unify-call-agent-and-call-agents-behavior.md
+     */
+    async callAgents(params: {
+        readonly tasks: ReadonlyArray<CallAgentsTask>;
         readonly waitForReply?: boolean;
         readonly messageId?: string;
         readonly parentMessageId?: string;
@@ -440,20 +477,28 @@ export class AgentContext {
         const { tasks, waitForReply = true, messageId, parentMessageId } = params;
 
         if (!tasks || tasks.length === 0) {
-            return { status: 'EMPTY', taskGroupId: '', dispatchedTasks: [] };
+            throw new Error('callAgents/dispatchGroup requires at least one task');
+        }
+        if (messageId && tasks.length > 1) {
+            throw new Error(
+                `callAgents/dispatchGroup cannot share one messageId across ${tasks.length} tasks: `
+                + "Task Group results are keyed by each sub-task's own messageId, so the siblings "
+                + 'would overwrite each other. Pass a per-task "messageId" instead.'
+            );
         }
 
-        const taskGroupId = `tg-${uuidv4().slice(0, 8)}`;
+        const taskGroupId = `${TASK_GROUP_ID_PREFIX}${uuidv4().slice(0, 8)}`;
         const wait = waitForReply ?? true;
         const groupDispatchStartTs = Date.now();
+        const groupKey = QueueNames.task_group(taskGroupId);
 
         // Setup Redis counters if waiting for replies
         if (wait) {
-            const groupKey = QueueNames.task_group(taskGroupId);
             await this.redis.hset(groupKey, {
                 [TASK_GROUP_FIELD_TOTAL]: tasks.length.toString(),
                 [TASK_GROUP_FIELD_COMPLETED]: '0',
-                source_agent_type: this.currentAgentType,
+                [TASK_GROUP_FIELD_SOURCE_AGENT]: this.currentAgentType,
+                [TASK_GROUP_FIELD_PROTOCOL_VERSION]: TASK_GROUP_PROTOCOL_V2,
             });
             await this.redis.expire(groupKey, TASK_GROUP_TTL_SECONDS);
             this._isSuspended = true;
@@ -462,12 +507,16 @@ export class AgentContext {
         }
 
         const dispatchedTasks: DispatchedTask[] = [];
+        const pendingFailures: ResumeCommand[] = [];
         const { WorkerRegistry } = await import('./registry');
-        const dispatchRegistry = new WorkerRegistry(this.redis);
+        const registry = new WorkerRegistry(this.redis);
+        const deps = createRedisCallAgentDeps({ redis: this.redis, registry, queueNames: QueueNames });
+        const currentHeader = this.currentCommand instanceof AskAgentCommand
+            ? this.currentCommand.header
+            : undefined;
 
         for (const task of tasks) {
-            const currentMessageId = this.generateMessageId();
-            const currentParentMessageId = parentMessageId || this.currentMessageId;
+            const currentMessageId = task.messageId || messageId || this.generateMessageId();
 
             // Compute trace span IDs for this sub-task
             const callParentSpanId = `${currentMessageId}:client.dispatch`;
@@ -479,86 +528,114 @@ export class AgentContext {
                 framework_parent_span_id: callParentSpanId,
             };
 
-            const mergedPayload: Record<string, unknown> = { ...(task.payload || {}) };
-            if (wait) {
-                mergedPayload.wait_for_reply = true;
-            }
-
-            const command = new AskAgentCommand(
-                new MessageHeader(currentMessageId, this.sessionId, this.traceId, {
-                    sourceAgentType: wait ? this.currentAgentType : '',
-                    targetAgentType: task.targetAgentType,
-                    parentMessageId: currentParentMessageId,
-                    taskGroupId: taskGroupId,
-                    metadata: taskMetadata,
-                    traceParentSpanId,
-                    langfuseParentObservationId: this.traceParentObservationId || '',
-                }),
-                task.content,
-                wait,
-                Object.fromEntries(Object.entries(mergedPayload).filter(([key]) => key !== 'wait_for_reply'))
-            );
+            const input: CallAgentPublishInput = {
+                sessionId: this.sessionId,
+                traceId: this.traceId,
+                sourceAgentType: this.currentAgentType,
+                defaultParentMessageId: this.currentMessageId,
+                targetAgentType: task.targetAgentType,
+                content: task.content,
+                extraPayload: task.extraPayload ?? task.payload,
+                waitForReply: wait,
+                userCode: currentHeader?.userCode,
+                userName: currentHeader?.userName,
+                taskGroupId,
+                metadata: taskMetadata,
+                messageId: currentMessageId,
+                parentMessageId,
+                routePolicy: task.routePolicy,
+                availabilityTimeoutMs: task.availabilityTimeoutMs,
+                region: task.region,
+                priority: task.priority,
+                langfuseParentObservationId: this.traceParentObservationId || '',
+            };
 
             if (this.pluginRegistry) {
-                await this.pluginRegistry.onCallAgentStart(this, command);
+                await this.pluginRegistry.onCallAgentStart(this, task);
             }
 
-            // Initialize execution record for each dispatched task
-            await dispatchRegistry.initializeExecution({
-                execution_id: `exec-${uuidv4().slice(0, 8)}`,
-                message_id: currentMessageId,
-                parent_message_id: currentParentMessageId,
-                session_id: this.sessionId,
-                trace_id: this.traceId,
-                source_agent_type: wait ? this.currentAgentType : '',
-                stream_name: QueueNames.ctrl_stream(task.targetAgentType),
-                worker_id: '',
-                target_agent_type: task.targetAgentType,
-                status: 'QUEUED',
-                cancel_requested: false,
-                cancel_reason: '',
-            });
-
             const dispatchStartTs = Date.now();
+            let taskResult: CallAgentPublishResult;
             try {
-                await this.redis.xadd(
-                    QueueNames.ctrl_stream(task.targetAgentType),
-                    '*',
-                    'data',
-                    JSON.stringify(command.toDict())
-                );
+                taskResult = await publishCallAgent(deps, input);
             } catch (error: any) {
+                // A genuine dispatch-time failure (not an availability rejection,
+                // which publishCallAgent turns into a FAILED result instead of
+                // throwing). Stop fanning out and mark the group aborted so
+                // already-sent siblings' replies cannot later resume this
+                // now-failed caller execution. Synthetic replies queued so far are
+                // dropped with the throw: the worker only flushes them once
+                // processCommand returns normally.
                 if (this.pluginRegistry) {
-                    await this.pluginRegistry.onCallAgentError(this, command, error instanceof Error ? error : new Error(String(error)));
+                    await this.pluginRegistry.onCallAgentError(this, task, error instanceof Error ? error : new Error(String(error)));
+                }
+                if (wait) {
+                    await this.redis.hset(groupKey, { [TASK_GROUP_FIELD_ABORTED]: '1' });
                 }
                 throw error;
             }
 
             await this._recordAgentDispatchSpan({
                 messageId: currentMessageId,
-                parentMessageId: currentParentMessageId,
+                parentMessageId: taskResult.parentMessageId || this.currentMessageId,
                 sourceAgentType: wait ? this.currentAgentType : '',
-                targetAgentType: task.targetAgentType,
-                routePolicy: 'SEND_ANYWAY',
-                routeStatus: 'GROUP_DISPATCH',
+                targetAgentType: taskResult.targetAgentType,
+                routePolicy: task.routePolicy || RoutePolicy.FAIL_FAST,
+                routeStatus: taskResult.routeStatus || '',
                 startTs: dispatchStartTs,
                 endTs: Date.now(),
             });
 
-            const taskResult = {
-                status: AgentState.QUEUED,
-                messageId: currentMessageId,
-                parentMessageId: currentParentMessageId,
-                targetAgentType: task.targetAgentType,
-            };
             if (this.pluginRegistry) {
-                await this.pluginRegistry.onCallAgentComplete(this, command, taskResult);
+                if (taskResult.status === AgentState.FAILED) {
+                    await this.pluginRegistry.onCallAgentError(this, task, new Error(taskResult.error || 'agent type unavailable'));
+                } else {
+                    await this.pluginRegistry.onCallAgentComplete(this, task, taskResult);
+                }
             }
 
-            dispatchedTasks.push({
+            if (taskResult.status === AgentState.FAILED && wait) {
+                // The target agent type was unavailable, so no worker will ever
+                // reply for this sub-task. Rather than book-keeping the group here
+                // — a second implementation of the accounting GatewayWorker's Group
+                // Join owns, and the one that could push `completed` to `total`
+                // with nobody left to resume the caller — synthesize the reply a
+                // sub-agent WOULD have sent had it started and failed.
+                pendingFailures.push(this._buildGroupFailureReply({
+                    taskGroupId,
+                    callerMessageId: taskResult.parentMessageId || this.currentMessageId,
+                    taskMessageId: currentMessageId,
+                    targetAgentType: taskResult.targetAgentType,
+                    error: taskResult.error,
+                    errorCode: taskResult.error_code,
+                    metadata: taskMetadata,
+                }));
+            }
+
+            const dispatched: DispatchedTask = {
                 message_id: currentMessageId,
-                target_agent_type: task.targetAgentType,
+                // taskResult.targetAgentType reflects any fallback reroute the
+                // publish pipeline performed, so this stays consistent with what
+                // Group Join later reports.
+                target_agent_type: taskResult.targetAgentType,
+                status: taskResult.status,
+            };
+            if (taskResult.status === AgentState.FAILED) {
+                // Same shape a real sub-agent failure arrives in, so callers read
+                // dispatch-time and run-time failures the same way.
+                dispatched.reply_data = { error: taskResult.error, error_code: taskResult.error_code };
+            }
+            dispatchedTasks.push(dispatched);
+        }
+
+        if (wait) {
+            // Written after the loop so it records exactly what was dispatched.
+            // Group Join aggregates in this order and uses it to name results that
+            // never arrived.
+            await this.redis.hset(groupKey, {
+                [TASK_GROUP_FIELD_TASK_ORDER]: JSON.stringify(dispatchedTasks.map((t) => t.message_id)),
             });
+            this._pendingGroupReplies.push(...pendingFailures);
         }
 
         // Record aggregate span for the entire group dispatch
@@ -590,10 +667,67 @@ export class AgentContext {
         }
 
         return {
-            status: 'GROUP_QUEUED',
+            status: AgentState.QUEUED,
             taskGroupId,
             dispatchedTasks,
         };
+    }
+
+    /** Alias for callAgents, kept permanently for source compatibility. Not deprecated. */
+    async dispatchGroup(params: {
+        readonly tasks: ReadonlyArray<CallAgentsTask>;
+        readonly waitForReply?: boolean;
+        readonly messageId?: string;
+        readonly parentMessageId?: string;
+    }): Promise<DispatchGroupResult> {
+        return this.callAgents(params);
+    }
+
+    /**
+     * Build the reply a sub-agent WOULD have sent had it started and failed.
+     *
+     * The header derivation mirrors GatewayWorker.enqueueAgentReturn exactly,
+     * because that shape is load-bearing in two places:
+     *
+     * - header.messageId must be the CALLER's own message id: WorkerRunner
+     *   reattaches a ResumeCommand to the suspended execution via
+     *   getExecutionByMessageId(header.messageId), so any other value would
+     *   orphan the caller's execution instead of resuming it.
+     * - header.parentMessageId must be this sub-task's dispatch message id: it
+     *   is what Group Join keys the result hash by, and the only per-sibling-
+     *   unique id available on a reply.
+     *
+     * replyData carries the failure detail because that is how a real failure
+     * arrives (GatewayWorker returns status=FAILED, replyData={error}); putting
+     * it anywhere else would make dispatch-time and run-time failures read
+     * differently.
+     */
+    private _buildGroupFailureReply(params: {
+        readonly taskGroupId: string;
+        readonly callerMessageId: string;
+        readonly taskMessageId: string;
+        readonly targetAgentType: string;
+        readonly error?: string;
+        readonly errorCode?: string;
+        readonly metadata?: Readonly<Record<string, unknown>>;
+    }): ResumeCommand {
+        const currentHeader = this.currentCommand instanceof AskAgentCommand
+            ? this.currentCommand.header
+            : undefined;
+        return new ResumeCommand(
+            new MessageHeader(params.callerMessageId, this.sessionId, this.traceId, {
+                sourceAgentType: params.targetAgentType,
+                targetAgentType: this.currentAgentType,
+                parentMessageId: params.taskMessageId,
+                taskGroupId: params.taskGroupId,
+                userCode: currentHeader?.userCode,
+                userName: currentHeader?.userName,
+                metadata: { ...(params.metadata || {}) } as Record<string, JsonValue>,
+            }),
+            '',
+            AgentState.FAILED,
+            { error: params.error ?? null, error_code: params.errorCode ?? 'AGENT_TYPE_UNAVAILABLE' }
+        );
     }
 
     /**
@@ -610,7 +744,18 @@ export class AgentContext {
         const totalStr = await this.redis.hget(groupKey, TASK_GROUP_FIELD_TOTAL);
         const total = totalStr ? parseInt(totalStr, 10) : Infinity;
 
-        const results: GroupResult[] = [];
+        // Ordering mirrors what Group Join hands the caller on resume: dispatch
+        // order, not the Redis hash's unspecified iteration order. A group from a
+        // pre-v2 dispatcher has no task_order and keeps hash order.
+        const rawOrder = await this.redis.hget(groupKey, TASK_GROUP_FIELD_TASK_ORDER);
+        let order: string[] = [];
+        try {
+            order = rawOrder ? JSON.parse(rawOrder) : [];
+        } catch {
+            order = [];
+        }
+
+        let results: GroupResult[] = [];
         const startTime = Date.now();
 
         while (results.length < total) {
@@ -621,9 +766,17 @@ export class AgentContext {
 
             const rawResults = await this.redis.hgetall(resultsKey);
             if (rawResults) {
-                for (const [msgId, data] of Object.entries(rawResults)) {
+                // Rebuilt, not appended to: this loop polls the same hash
+                // repeatedly, so pushing onto the previous pass's array would
+                // duplicate every result already seen.
+                const orderedIds = [
+                    ...order.filter((m) => Object.prototype.hasOwnProperty.call(rawResults, m)),
+                    ...Object.keys(rawResults).filter((m) => !order.includes(m)),
+                ];
+                results = [];
+                for (const msgId of orderedIds) {
                     try {
-                        const parsed = JSON.parse(data as string);
+                        const parsed = JSON.parse(rawResults[msgId] as string);
                         results.push({
                             message_id: msgId,
                             status: parsed.status || '',
