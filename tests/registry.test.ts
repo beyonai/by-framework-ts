@@ -316,6 +316,27 @@ describe('WorkerRegistry', () => {
         expect(exec!.updated_at).toBeDefined();
     });
 
+    test('markExecutionFinished does not stamp finished_at for a non-terminal status', async () => {
+        // The runner calls this with whatever status the task returned. A caller
+        // suspended on a Task Group returns "QUEUED: waiting_for_group" — that is
+        // a suspend, not a finish, and stamping finished_at would make a still-
+        // running execution look completed to latency/completed-count metrics.
+        await registry.saveExecution({
+            execution_id: 'exec-suspended',
+            message_id: 'msg-suspended',
+            session_id: 'sess-suspended',
+            worker_id: 'worker-4',
+            status: 'RUNNING',
+        });
+
+        await registry.markExecutionFinished('exec-suspended', 'sess-suspended', 'QUEUED: waiting_for_group');
+
+        const exec = await registry.getExecution('exec-suspended', 'sess-suspended');
+        expect(exec!.status).toBe('QUEUED: waiting_for_group');
+        expect(exec!.finished_at).toBeUndefined();
+        expect(exec!.updated_at).toBeDefined();
+    });
+
     test('markExecutionFinished is noop when not found', async () => {
         await expect(registry.markExecutionFinished('nonexistent', 'sess-1', 'COMPLETED')).resolves.not.toThrow();
     });

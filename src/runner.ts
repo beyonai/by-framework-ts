@@ -399,7 +399,23 @@ export class WorkerRunner {
                 ? await registry.getExecutionByMessageId(data.header.messageId, data.header.sessionId)
                 : null;
 
-            if (existingExecution && this.terminalExecutionStates.has(String(existingExecution.status || ''))) {
+            if (data instanceof ResumeCommand && !existingExecution) {
+                // Not fatal, but it means this resume is starting a NEW,
+                // disconnected execution instead of continuing the suspended one
+                // it was meant to resume. Silently doing so is how orphaned
+                // executions hide.
+                console.warn(`[${this.worker.workerId}] ResumeCommand did not resolve to an existing execution (message_id=${data.header.messageId}, session_id=${data.header.sessionId}); starting a new, disconnected execution instead of continuing the suspended one.`);
+            }
+
+            // Skip terminal-state replays — but never for a ResumeCommand. A
+            // resume is the CONTINUATION of the execution it resolves to, not a
+            // replay of it, so acking it away here would silently drop a real
+            // reply. Dormant until agent returns started carrying the caller's
+            // messageId (see GatewayWorker.enqueueAgentReturn); without this
+            // exception that fix turns an orphaned execution into a lost reply.
+            if (existingExecution
+                && this.terminalExecutionStates.has(String(existingExecution.status || ''))
+                && !(data instanceof ResumeCommand)) {
                 await this.redis.xack(streamName, this.groupName, msgId);
                 return;
             }

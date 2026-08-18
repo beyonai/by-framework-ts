@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Redis } from 'ioredis';
 import { getRedis } from './redis_client';
 import { RegistryKeys } from './constants';
+import { isTerminalState } from './protocol/agent_state';
 
 function getLocalIpAddress(): string {
     const interfaces = os.networkInterfaces();
@@ -516,7 +517,14 @@ export class WorkerRegistry {
 
         const now = Date.now();
         current.status = status;
-        current.finished_at = now;
+        // Only a TERMINAL status finishes an execution. The runner calls this
+        // with whatever status the task returned, which for a suspended caller
+        // is e.g. "QUEUED: waiting_for_group" — stamping finished_at there makes
+        // a still-running execution look completed to latency/completed-count
+        // metrics, and misreports a suspend as a finish.
+        if (isTerminalState(status)) {
+            current.finished_at = now;
+        }
         current.updated_at = now;
 
         const timeline = Array.isArray(current.timeline) ? current.timeline : [];

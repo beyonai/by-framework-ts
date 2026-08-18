@@ -194,19 +194,66 @@ const child = await context.callAgent({
 });
 ```
 
-Scatter-Gather is also supported:
+Scatter-Gather is also supported. `callAgents` is `callAgent`'s plural: each task
+behaves exactly like the equivalent single `callAgent`, and the caller is resumed
+once — with every task's result — after all of them complete. `dispatchGroup` is a
+permanent alias of it, not deprecated.
 
 ```typescript
-const group = await context.dispatchGroup({
+const group = await context.callAgents({
     tasks: [
         { targetAgentType: 'agent-a', content: 'task A' },
         { targetAgentType: 'agent-b', content: 'task B' },
     ],
     waitForReply: true,
 });
-
-const results = await context.collectGroupResults(group.taskGroupId, 30);
+// { status: 'QUEUED', taskGroupId: 'tg-...', dispatchedTasks: [...] }
 ```
+
+The Worker is resumed with a `ResumeCommand` whose `replyData` is the ordered
+aggregate, one entry per task, in dispatch order:
+
+```typescript
+async processCommand(command, context) {
+    if (command instanceof ResumeCommand) {
+        for (const item of command.replyData as any[]) {
+            console.log(item.target_agent_type, item.status, item.content);
+        }
+        // command.content is '' on a group resume: replyData is the single
+        // aggregation channel.
+        return { status: 'completed', content: summarize(command.replyData) };
+    }
+}
+```
+
+`collectGroupResults(taskGroupId, timeout?)` still polls the same results from
+outside a resume, in the same order.
+
+Per task, every option `callAgent` takes is accepted, with the same defaults:
+
+| Key | Default | Notes |
+|---|---|---|
+| `targetAgentType` | — | required |
+| `content` | — | any JSON-serializable value |
+| `extraPayload`, `metadata` | `{}` | |
+| `messageId` | generated | pass one per task; a batch cannot share one (results are keyed per sub-task) |
+| `routePolicy` | `FAIL_FAST` | `SEND_ANYWAY` queues for an agent type whose workers have not started yet |
+| `availabilityTimeoutMs` | `30000` | |
+| `region`, `priority` | — , `0` | |
+
+Behaviour worth knowing:
+
+- An unavailable target fails **that task only** — it lands in the aggregate as a
+  `FAILED` entry carrying `reply_data.error_code`, and its siblings still dispatch.
+- `callAgents({ tasks: [] })` throws instead of returning a no-op result.
+- A dispatch-time infrastructure failure marks the group aborted; late sibling
+  replies are discarded rather than resuming a caller that already failed.
+
+**Upgrading:** the Task Group state contract is versioned (see
+`by-framework-python/docs/adr/0001-unify-call-agent-and-call-agents-behavior.md`).
+A new Worker joins an old group with the old semantics, but an old Worker cannot do
+the reverse — **drain in-flight task groups, or restart the whole agent-type pool at
+once, before upgrading a mixed pool.**
 
 ## Core API
 
@@ -383,7 +430,8 @@ The base class automatically handles:
 | `emitArtifact(event, eventType?)` | Push file artifacts |
 | `askUser(event)` | Request user input and mark task as waiting |
 | `callAgent(params)` | Call a downstream Agent |
-| `dispatchGroup(params)` | Dispatch multiple downstream tasks in parallel |
+| `callAgents(params)` | Dispatch multiple downstream tasks in parallel; caller resumes once with the ordered aggregate |
+| `dispatchGroup(params)` | Permanent alias for `callAgents` |
 | `collectGroupResults(taskGroupId, timeout?)` | Collect results for a task group |
 | `checkCancelled()` | Throws `TaskCancelledError` if task was cancelled |
 | `isCancelRequested()` | Check for cancellation signal |

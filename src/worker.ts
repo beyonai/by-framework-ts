@@ -7,7 +7,7 @@ import { GatewayCommand, ResumeCommand, AskAgentCommand } from './protocol/comma
 import { AgentState, isTerminalState } from './protocol/agent_state';
 import { EventType } from './protocol/event_type';
 import { AgentContext, TaskCancelledError } from './context';
-import { QueueNames, RegistryKeys, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED } from './constants';
+import { QueueNames, RegistryKeys, TASK_GROUP_TTL_SECONDS, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_FIELD_ABORTED, TASK_GROUP_FIELD_PROTOCOL_VERSION, TASK_GROUP_FIELD_TASK_ORDER, TASK_GROUP_PROTOCOL_V2 } from './constants';
 import { WorkerRegistry } from './registry';
 import { WorkerHeartbeat } from './heartbeat';
 import { MessageHeader } from './protocol/message_header';
@@ -196,15 +196,35 @@ export abstract class GatewayWorker {
                     const resultsKey = QueueNames.task_group_results(command.header.taskGroupId);
                     const totalStr = await this.redis.hget(groupKey, TASK_GROUP_FIELD_TOTAL);
                     if (totalStr !== null) {
+                        const aborted = await this.redis.hget(groupKey, TASK_GROUP_FIELD_ABORTED);
+                        if (aborted) {
+                            console.warn(`[${this.workerId}] TaskGroup ${command.header.taskGroupId} is aborted, discarding late reply from sub-task message_id=${command.header.parentMessageId}`);
+                            return new AgentTaskResult({ status: `${AgentState.CANCELLED}: group_aborted` });
+                        }
+
+                        // Which Task Group contract this group was dispatched under.
+                        // No stamp means a pre-v2 dispatcher wrote it — possibly a
+                        // worker still running the old code mid-upgrade — so it must
+                        // keep being joined the old way.
+                        const protocolVersion = await this.redis.hget(groupKey, TASK_GROUP_FIELD_PROTOCOL_VERSION);
+                        const isV2 = protocolVersion === TASK_GROUP_PROTOCOL_V2;
+
                         // Store result in Redis Hash for distributed access
                         const resultData = {
                             status: (command as ResumeCommand).status,
                             reply_data: (command as ResumeCommand).replyData,
                             content: (command as ResumeCommand).content,
+                            // This reply flows FROM the sub-agent back TO the caller,
+                            // so its sourceAgentType is the agent that produced it.
+                            target_agent_type: command.header.sourceAgentType,
                             metadata: command.header.metadata,
                             extra_payload: (command as ResumeCommand).extraPayload,
                         };
-                        await this.redis.hset(resultsKey, command.header.messageId, JSON.stringify(resultData));
+                        // Under v2, parentMessageId is the sub-task's own dispatch id —
+                        // unique per sibling. messageId is the caller's id, shared by
+                        // every sibling, so keying by it lets them overwrite each other.
+                        const resultField = isV2 ? command.header.parentMessageId : command.header.messageId;
+                        await this.redis.hset(resultsKey, resultField, JSON.stringify(resultData));
                         await this.redis.expire(resultsKey, TASK_GROUP_TTL_SECONDS);
 
                         const completed = await this.redis.hincrby(groupKey, TASK_GROUP_FIELD_COMPLETED, 1);
@@ -213,12 +233,36 @@ export abstract class GatewayWorker {
                             return new AgentTaskResult({ status: `${AgentState.QUEUED}: waiting_for_group` });
                         }
                         console.log(`[${this.workerId}] TaskGroup ${command.header.taskGroupId} ALL COMPLETED (${totalStr})!`);
+
+                        if (isV2 && command instanceof ResumeCommand) {
+                            const aggregated = await this.aggregateTaskGroup({
+                                groupKey,
+                                resultsKey,
+                                taskGroupId: command.header.taskGroupId,
+                                total: parseInt(totalStr, 10),
+                            });
+                            // replyData is the single aggregation channel for a group
+                            // resume. Leaving content as whichever sibling replied last
+                            // would give the caller two channels that disagree.
+                            command = new ResumeCommand(
+                                command.header,
+                                '',
+                                command.status,
+                                aggregated as JsonValue,
+                                command.extraPayload
+                            );
+                        }
                     }
                 }
                 await context.emitState({ state: AgentState.RESUMED });
             }
 
             const result = await this.processCommand(command, context);
+            // Only reached when processCommand returned normally. If it threw,
+            // callAgents has already marked the Task Group aborted and these
+            // replies must NOT be sent — the caller execution they would resume
+            // is the one that just failed.
+            await this.flushPendingGroupReplies(context);
             const taskResult = normalizeProcessResult(result);
 
             // Determine final status from result
@@ -333,6 +377,88 @@ export abstract class GatewayWorker {
         }
     }
 
+    /**
+     * Collect a completed Task Group's results in dispatch order.
+     *
+     * Order comes from the group's `task_order` field, not from `hgetall`,
+     * whose order is unspecified — a caller fanning out to N agents needs to
+     * know which result is which without matching by hand.
+     *
+     * Results present in Redis but absent from `task_order` are appended
+     * rather than dropped, and a short result set is logged loudly. Silently
+     * returning fewer results than were dispatched is the failure mode this
+     * SDK family rules out.
+     */
+    private async aggregateTaskGroup(params: {
+        readonly groupKey: string;
+        readonly resultsKey: string;
+        readonly taskGroupId: string;
+        readonly total: number;
+    }): Promise<Array<Record<string, unknown>>> {
+        const { groupKey, resultsKey, taskGroupId, total } = params;
+        const rawResults = (await this.redis.hgetall(resultsKey)) || {};
+        const rawOrder = await this.redis.hget(groupKey, TASK_GROUP_FIELD_TASK_ORDER);
+        let order: string[] = [];
+        try {
+            order = rawOrder ? JSON.parse(rawOrder) : [];
+        } catch {
+            console.error(`[${this.workerId}] TaskGroup ${taskGroupId} has an unreadable ${TASK_GROUP_FIELD_TASK_ORDER} field (${rawOrder}); falling back to Redis hash order`);
+            order = [];
+        }
+
+        const aggregated: Array<Record<string, unknown>> = [];
+        const seen = new Set<string>();
+        for (const messageId of order) {
+            if (Object.prototype.hasOwnProperty.call(rawResults, messageId)) {
+                aggregated.push({ message_id: messageId, ...JSON.parse(rawResults[messageId]) });
+                seen.add(messageId);
+            }
+        }
+        for (const [messageId, data] of Object.entries(rawResults)) {
+            if (!seen.has(messageId)) {
+                aggregated.push({ message_id: messageId, ...JSON.parse(data) });
+            }
+        }
+
+        if (aggregated.length !== total) {
+            const missing = order.filter((m) => !Object.prototype.hasOwnProperty.call(rawResults, m));
+            console.error(`[${this.workerId}] TaskGroup ${taskGroupId} aggregated ${aggregated.length} result(s) but expected ${total}; missing sub-task message_ids=${missing.length ? JSON.stringify(missing) : 'unknown'}. Resuming the caller with an incomplete result set.`);
+        }
+        return aggregated;
+    }
+
+    /**
+     * Deliver replies for Task Group sub-tasks that never reached a worker.
+     *
+     * AgentContext.callAgents queues these instead of sending them inline:
+     * sending during the dispatch loop would put a reply on the caller's
+     * control stream strictly before the caller's processCommand returns,
+     * turning the pre-existing "a very fast sub-agent replies before the caller
+     * suspends" race from unlikely into certain.
+     *
+     * Failures are logged, never thrown: a Task Group that cannot be told about
+     * a dispatch failure will time out, whereas throwing here would also
+     * destroy the caller's own result.
+     */
+    private async flushPendingGroupReplies(context: AgentContext): Promise<void> {
+        const pending = (context as any)._pendingGroupReplies as ResumeCommand[] | undefined;
+        if (!pending || pending.length === 0) return;
+        const replies = [...pending];
+        pending.length = 0;
+        for (const reply of replies) {
+            try {
+                await this.redis.xadd(
+                    QueueNames.ctrl_stream(reply.header.targetAgentType),
+                    '*',
+                    'data',
+                    JSON.stringify(reply.toDict())
+                );
+            } catch (error: any) {
+                console.error(`[${this.workerId}] Failed to deliver Task Group ${reply.header.taskGroupId} dispatch-failure reply for sub-task ${reply.header.parentMessageId}: ${error?.message ?? error}`);
+            }
+        }
+    }
+
     private async enqueueAgentReturn(
         command: GatewayCommand,
         status: string,
@@ -351,7 +477,15 @@ export abstract class GatewayWorker {
         };
 
         const callbackMsg = new ResumeCommand(
-            new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId, {
+            // messageId MUST be the caller's own message id (this dispatch's
+            // parentMessageId). WorkerRunner reattaches the suspended caller
+            // execution via getExecutionByMessageId(header.messageId); a fresh
+            // id there makes that lookup miss every time, so the reply mints a
+            // new execution and orphans the one it was meant to continue.
+            // parentMessageId stays this sub-task's own id — the only value
+            // that is unique per sibling, which is what Group Join keys the
+            // result hash by under protocol v2.
+            new MessageHeader(header.parentMessageId || `msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId, {
                 sourceAgentType: header.targetAgentType || this.workerId,
                 targetAgentType: header.sourceAgentType,
                 parentMessageId: header.messageId,
