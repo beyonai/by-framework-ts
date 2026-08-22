@@ -104,7 +104,7 @@ export class GatewayProcessor {
             ...(options.metadata ?? {}),
         };
         const callbackMsg = new ResumeCommand(
-            new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId || uuidv4().replace(/-/g, ''), {
+            new MessageHeader(header.parentMessageId || `msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId || uuidv4().replace(/-/g, ''), {
                 sourceAgentType: header.targetAgentType || this.workerId,
                 targetAgentType: header.sourceAgentType || '',
                 parentMessageId: header.messageId,

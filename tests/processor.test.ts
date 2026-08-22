@@ -43,6 +43,7 @@ describe('GatewayProcessor', () => {
             new MessageHeader('msg-1', 'sess-1', 'trace-1', {
                 sourceAgentType: 'agent-a',
                 targetAgentType: 'agent-b',
+                parentMessageId: 'caller-msg-1',
             }),
             'do something'
         );
@@ -68,6 +69,7 @@ describe('GatewayProcessor', () => {
         expect(callbackData.body.reply_data).toBe('task result');
         expect(callbackData.body.extra_payload).toEqual({ debug_id: 'abc' });
         expect(callbackData.header.metadata).toEqual({ tokens: 123 });
+        expect(callbackData.header.message_id).toBe('caller-msg-1');
         expect(callbackData.header.target_agent_type).toBe('agent-a');
         expect(callbackData.header.source_agent_type).toBe('agent-b');
         expect(callbackData.header.parent_message_id).toBe('msg-1');

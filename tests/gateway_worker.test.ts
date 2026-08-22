@@ -151,6 +151,7 @@ describe('GatewayWorker', () => {
             new MessageHeader('msg-5', 'sess-5', 'trace-5', {
                 sourceAgentType: 'caller-agent',
                 targetAgentType: 'test-agent',
+                parentMessageId: 'caller-msg-5',
             }),
             'callback test'
         );
@@ -164,6 +165,7 @@ describe('GatewayWorker', () => {
         expect(callbackData.action_type).toBe(ActionType.RESUME);
         expect(callbackData.body.status).toBe('COMPLETED');
         expect(callbackData.body.reply_data).toBe('result data');
+        expect(callbackData.header.message_id).toBe('caller-msg-5');
         expect(callbackData.header.target_agent_type).toBe('caller-agent');
         expect(callbackData.header.parent_message_id).toBe('msg-5');
     });

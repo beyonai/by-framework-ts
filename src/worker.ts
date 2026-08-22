@@ -351,7 +351,7 @@ export abstract class GatewayWorker {
         };
 
         const callbackMsg = new ResumeCommand(
-            new MessageHeader(`msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId, {
+            new MessageHeader(header.parentMessageId || `msg-${uuidv4().slice(0, 8)}`, header.sessionId, header.traceId, {
                 sourceAgentType: header.targetAgentType || this.workerId,
                 targetAgentType: header.sourceAgentType,
                 parentMessageId: header.messageId,
