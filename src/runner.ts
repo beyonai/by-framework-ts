@@ -404,7 +404,13 @@ export class WorkerRunner {
                 return;
             }
 
-            const executionId = String(existingExecution?.execution_id || `exec-${uuidv4().slice(0, 8)}`);
+            // Upstream cancellation addresses executions by trace_id. Preserve that stable
+            // identifier when the producer has not already created an execution record.
+            const executionId = String(
+                existingExecution?.execution_id
+                || data.header.traceId
+                || `exec-${uuidv4().slice(0, 8)}`
+            );
             const cancelReason = String(existingExecution?.cancel_reason || '');
             const parentMessageId = String(existingExecution?.parent_message_id || data.header.parentMessageId || '');
             const abortController = new AbortController();
@@ -677,7 +683,7 @@ export class WorkerRunner {
         }
     }
 
-    async start(options: { handleSignals?: boolean } = {}): Promise<void> {
+    async start(options: { handleSignals?: boolean; initialize?: boolean } = {}): Promise<void> {
         const signalHandler = async () => {
             console.log('\nReceived shutdown signal, stopping runner...');
             this.stop();
@@ -691,7 +697,9 @@ export class WorkerRunner {
         }
 
         try {
-            await this.initialize();
+            if (options.initialize !== false) {
+                await this.initialize();
+            }
             console.log(`[${this.worker.workerId}] Runner auto-loop started, waiting for tasks...`);
 
             this.running = true;
@@ -829,8 +837,17 @@ export class WorkerRunner {
         };
     }
 
-    stop(): void {
+    stop(options: { cancelActiveExecutions?: boolean; reason?: string } = {}): void {
         this.running = false;
         this.controlLoopRunning = false;
+        if (options.cancelActiveExecutions) {
+            const reason = options.reason || 'worker runner stopped';
+            for (const execution of this.activeExecutions.values()) {
+                execution.cancelReason = reason;
+                if (!execution.abortController.signal.aborted) {
+                    execution.abortController.abort(reason);
+                }
+            }
+        }
     }
 }

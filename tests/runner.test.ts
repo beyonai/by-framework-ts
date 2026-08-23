@@ -95,6 +95,42 @@ class SlowWorker extends GatewayWorker {
 }
 
 describe('WorkerRunner cancellation flow', () => {
+    test('can start an embedded polling loop after explicit initialization', async () => {
+        const redis = new MockRedisRunner();
+        const registry = new TestRegistry();
+        const worker = new SlowWorker('worker-1', registry as any, redis as any);
+        const runner = new WorkerRunner(worker, { redisClient: redis as any, groupName: 'test-group' });
+        const initialize = jest.spyOn(runner, 'initialize').mockResolvedValue(undefined);
+        const release = jest.spyOn(runner, 'release').mockResolvedValue(undefined);
+        jest.spyOn(runner, 'poll').mockImplementation(async () => {
+            runner.stop();
+            return [];
+        });
+
+        await runner.start({ initialize: false });
+
+        expect(initialize).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    test('keeps initialization enabled by default', async () => {
+        const redis = new MockRedisRunner();
+        const registry = new TestRegistry();
+        const worker = new SlowWorker('worker-1', registry as any, redis as any);
+        const runner = new WorkerRunner(worker, { redisClient: redis as any, groupName: 'test-group' });
+        const initialize = jest.spyOn(runner, 'initialize').mockResolvedValue(undefined);
+        const release = jest.spyOn(runner, 'release').mockResolvedValue(undefined);
+        jest.spyOn(runner, 'poll').mockImplementation(async () => {
+            runner.stop();
+            return [];
+        });
+
+        await runner.start();
+
+        expect(initialize).toHaveBeenCalledTimes(1);
+        expect(release).toHaveBeenCalledTimes(1);
+    });
+
     test('sets up worker control stream', async () => {
         const redis = new MockRedisRunner();
         const registry = new TestRegistry();
@@ -260,6 +296,42 @@ describe('WorkerRunner cancellation flow', () => {
             worker_id: 'worker-1',
             status: 'RUNNING',
         }));
+    });
+
+    test('uses trace id as execution id when no execution record exists', async () => {
+        const redis = new MockRedisRunner();
+        const registry = new TestRegistry();
+        const worker = new SlowWorker('worker-1', registry as any, redis as any);
+        const runner = new WorkerRunner(worker, { redisClient: redis as any, groupName: 'test-group' });
+        const started = new Promise<void>((resolve) => {
+            worker.startedResolver = resolve;
+        });
+        const askCommand = new AskAgentCommand(
+            new MessageHeader('msg-trace', 'sess-trace', 'trace-stable', {
+                targetAgentType: 'dummy-agent',
+            }),
+            'hello'
+        );
+
+        const processing = runner.processAndAck(
+            QueueNames.ctrl_stream('dummy-agent'),
+            '6-0',
+            askCommand
+        );
+        await started;
+        runner.stop({ cancelActiveExecutions: true, reason: 'test shutdown' });
+        await expect(processing).resolves.toBeUndefined();
+
+        expect(registry.saveExecution).toHaveBeenCalledWith(expect.objectContaining({
+            execution_id: 'trace-stable',
+            message_id: 'msg-trace',
+            session_id: 'sess-trace',
+        }));
+        expect(registry.markExecutionFinished).toHaveBeenCalledWith(
+            'trace-stable',
+            'sess-trace',
+            'CANCELLED'
+        );
     });
 
     test('uses dedicated Redis duplicates for blocking task and control reads', async () => {

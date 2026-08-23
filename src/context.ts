@@ -86,6 +86,7 @@ export class AgentContext {
     private _isSuspended = false;
     private _permissionTransferred = false;
     private _isStreamFinished = false;
+    private _isFinalAnswerEmitted = false;
 
     public readonly executionId: string;
     public readonly spanRecorder: SpanRecorder;
@@ -151,6 +152,15 @@ export class AgentContext {
         return this._isStreamFinished;
     }
 
+    /** Mark a channel-owned FINAL_ANSWER so GatewayWorker does not emit it twice. */
+    setFinalAnswerEmitted(emitted: boolean): void {
+        this._isFinalAnswerEmitted = emitted;
+    }
+
+    isFinalAnswerEmitted(): boolean {
+        return this._isFinalAnswerEmitted;
+    }
+
     setStreamFinished(finished: boolean): void {
         this._isStreamFinished = finished;
     }
@@ -184,6 +194,15 @@ export class AgentContext {
             (this.cancelSignal as CancelSignalLegacy).aborted ||
             (this.cancelSignal as CancelSignalLegacy).is_set
         ));
+    }
+
+    /** Return the runner-owned abort signal so workers can bridge cancellation to nested work. */
+    getCancellationSignal(): AbortSignal | undefined {
+        const signal = this.cancelSignal;
+        if (!signal || typeof (signal as AbortSignal).addEventListener !== 'function') {
+            return undefined;
+        }
+        return signal as AbortSignal;
     }
 
     async checkCancelled(): Promise<void> {

@@ -206,6 +206,38 @@ describe('GatewayWorker', () => {
         });
     });
 
+    test('channel-owned finalAnswer is not emitted twice while callback keeps content', async () => {
+        const redis = new MockRedis();
+        const worker = createWorker(async (_command, context) => {
+            await context.emitChunk('channel final', 'finalAnswer');
+            context.setFinalAnswerEmitted(true);
+            return new AgentTaskResult({
+                status: AgentState.COMPLETED,
+                content: 'channel final',
+            });
+        }, redis);
+
+        const command = new AskAgentCommand(
+            new MessageHeader('msg-final-owner', 'sess-final-owner', 'trace-final-owner', {
+                sourceAgentType: 'BY_SUPER',
+                targetAgentType: 'test-agent',
+            }),
+            'final owner test'
+        );
+
+        await worker.handleMessage(command);
+
+        const sessionEvents = redis.calls
+            .filter((call) => call.name.includes('sess-final-owner'))
+            .map((call) => JSON.parse(call.payload));
+        expect(sessionEvents.filter((event) => event.event_type === 'finalAnswer')).toHaveLength(1);
+
+        const callback = redis.calls
+            .filter((call) => call.name.includes('BY_SUPER'))
+            .map((call) => JSON.parse(call.payload))[0];
+        expect(callback.body.content).toBe('channel final');
+    });
+
     test('handleMessage processes ResumeCommand and emits RESUMED state', async () => {
         const redis = new MockRedis();
         const worker = createWorker(async (cmd) => {

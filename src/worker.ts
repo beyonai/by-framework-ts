@@ -254,7 +254,7 @@ export abstract class GatewayWorker {
             }
             taskResult.finalAnswer = finalMessage || "";
 
-            if (finalMessage !== null) {
+            if (finalMessage !== null && !context.isFinalAnswerEmitted()) {
                 await context.emitChunk(finalMessage, EventType.FINAL_ANSWER);
             }
 
