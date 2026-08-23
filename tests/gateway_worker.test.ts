@@ -221,6 +221,7 @@ describe('GatewayWorker', () => {
             new MessageHeader('msg-final-owner', 'sess-final-owner', 'trace-final-owner', {
                 sourceAgentType: 'BY_SUPER',
                 targetAgentType: 'test-agent',
+                parentMessageId: 'caller-msg-final',
             }),
             'final owner test'
         );
@@ -230,7 +231,9 @@ describe('GatewayWorker', () => {
         const sessionEvents = redis.calls
             .filter((call) => call.name.includes('sess-final-owner'))
             .map((call) => JSON.parse(call.payload));
-        expect(sessionEvents.filter((event) => event.event_type === 'finalAnswer')).toHaveLength(1);
+        const finalEvents = sessionEvents.filter((event) => event.event_type === 'finalAnswer');
+        expect(finalEvents).toHaveLength(1);
+        expect(finalEvents[0].parent_message_id).toBe('caller-msg-final');
 
         const callback = redis.calls
             .filter((call) => call.name.includes('BY_SUPER'))

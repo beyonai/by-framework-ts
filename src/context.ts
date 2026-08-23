@@ -242,6 +242,7 @@ export class AgentContext {
             traceId: this.traceId,
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
+            parentMessageId: this.resolveCurrentParentMessageId(),
             ...params
         });
     }
@@ -255,6 +256,7 @@ export class AgentContext {
         await this.emitter.emitChunk(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
+            parentMessageId: this.resolveCurrentParentMessageId(),
             eventType: eventType as EventType
         });
         if (eventType === EventType.APP_STREAM_RESPONSE) {
@@ -267,14 +269,24 @@ export class AgentContext {
         await this.emitter.emitState(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
+            parentMessageId: this.resolveCurrentParentMessageId(),
             eventType: eventType as EventType
         });
+    }
+
+    private resolveCurrentParentMessageId(): string {
+        const command = this.currentCommand as { header?: { parentMessageId?: unknown } } | undefined;
+        const parentMessageId = command?.header?.parentMessageId;
+        return typeof parentMessageId === 'string' && parentMessageId.trim()
+            ? parentMessageId.trim()
+            : '-1';
     }
 
     async emitArtifact(event: ArtifactEvent | string, eventType?: string): Promise<void> {
         await this.emitter.emitArtifact(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
+            parentMessageId: this.resolveCurrentParentMessageId(),
             eventType: eventType as EventType
         });
     }
@@ -283,6 +295,7 @@ export class AgentContext {
         await this.emitter.askUser(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
+            parentMessageId: this.resolveCurrentParentMessageId(),
         });
         this._isSuspended = true;
         return { status: AgentState.WAITING_USER };
