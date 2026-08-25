@@ -158,6 +158,15 @@ export class GatewayProcessor {
      * writes on a root execution's record, and nothing consumes its control
      * stream.
      *
+     * Four fields come from that record, not from the waking message:
+     * sourceAgentType, parentMessageId, taskGroupId and metadata. The last one
+     * is restored as a full REPLACEMENT rather than a merge, exactly as
+     * GatewayWorker.resolveReplyCommand does it: the waking message (an askUser
+     * answer, or a sub-call's reply) is transient plumbing for that one hop, not
+     * something the caller ever sent. A record missing the field (an execution
+     * written before it existed) degrades to an empty object rather than leaking
+     * the waking message's metadata to the caller.
+     *
      * Unlike the worker path this is async: a GatewayProcessor has no runner
      * feeding it an execution snapshot, so it queries the registry itself.
      * Mirrors Python processor.py's _resolve_reply_header.
@@ -193,7 +202,8 @@ export class GatewayProcessor {
             taskGroupId: String(execution?.task_group_id || ''),
             userCode: header.userCode,
             userName: header.userName,
-            metadata: header.metadata,
+            // Replacement, not a merge with header.metadata — see above.
+            metadata: { ...(execution?.metadata || {}) },
             traceParentSpanId: header.traceParentSpanId,
             langfuseParentObservationId: header.langfuseParentObservationId,
         });
