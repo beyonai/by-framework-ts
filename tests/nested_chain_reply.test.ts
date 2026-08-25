@@ -154,6 +154,10 @@ describe('AC-TS-5: A -> B -> C, B replies to A with its OWN result', () => {
                     targetAgentType: 'agent-b',
                     content: 'do the thing',
                     routePolicy: RoutePolicy.SEND_ANYWAY,
+                    // A's own dispatch metadata: this is what has to reach A's
+                    // own reply intact even though B suspends (on a nested
+                    // callAgent to C) before B finally replies.
+                    metadata: { caller: 'agent-a', tag: 'keep' },
                 });
                 return { status: AgentState.QUEUED };
             }),
@@ -163,18 +167,27 @@ describe('AC-TS-5: A -> B -> C, B replies to A with its OWN result', () => {
                     return new AgentTaskResult({
                         status: AgentState.COMPLETED,
                         replyData: { from: 'b', refined: (command.replyData as any)?.from },
+                        // What this link contributes: must override same-named
+                        // keys from A's dispatch metadata while leaving the
+                        // other inherited keys untouched.
+                        metadata: { agent: 'agent-b', tag: 'from-agent-b' },
                     });
                 }
                 await context.callAgent({
                     targetAgentType: 'agent-c',
                     content: 'sub-thing',
                     routePolicy: RoutePolicy.SEND_ANYWAY,
+                    // B's own metadata for the B -> C hop: transient plumbing
+                    // for that hop only. It comes back on the reply that wakes
+                    // B, and must NOT leak through to A.
+                    metadata: { caller: 'should-not-leak', hop: 'b-to-c' },
                 });
                 return { status: AgentState.QUEUED };
             }),
             'agent-c': node(redis, 'agent-c', async () => new AgentTaskResult({
                 status: AgentState.COMPLETED,
                 replyData: { from: 'c' },
+                metadata: { from_c: 'should-not-leak' },
             })),
         };
         const bus = new Bus(redis, nodes);
@@ -224,6 +237,32 @@ describe('AC-TS-5: A -> B -> C, B replies to A with its OWN result', () => {
         expect(reply.replyData).toEqual({ from: 'b', refined: 'c' });
     });
 
+    test('A\'s own dispatch metadata survives B suspending, and B layers on top', async () => {
+        const { bus } = await runChain();
+
+        await bus.deliver('agent-b');
+        await bus.deliver('agent-c');
+
+        // Sanity: the reply that WAKES B carries the B -> C hop's metadata, so
+        // the assertions below are not vacuous — there really is a competing
+        // metadata dict on the command whose header used to be reused.
+        const waking = bus.pending('agent-b')[0];
+        expect(waking.header.metadata.caller).toBe('should-not-leak');
+        expect(waking.header.metadata.from_c).toBe('should-not-leak');
+
+        await bus.deliver('agent-b'); // B resumes and finishes
+
+        const reply = bus.pending('agent-a')[0];
+        // Base layer = what A dispatched, read back off B's execution record...
+        expect(reply.header.metadata.caller).toBe('agent-a');
+        // ...with B's own returned metadata overriding same-named keys...
+        expect(reply.header.metadata.tag).toBe('from-agent-b');
+        expect(reply.header.metadata.agent).toBe('agent-b');
+        // ...and nothing from the hop that merely woke B leaking through.
+        expect(reply.header.metadata).not.toHaveProperty('hop');
+        expect(reply.header.metadata).not.toHaveProperty('from_c');
+    });
+
     test('nothing is ever posted back down to C, the callee B just called', async () => {
         const { bus } = await runChain();
 
@@ -270,6 +309,9 @@ describe('AC-TS-6: a sub-agent that calls askUser replies to its caller afterwar
                     targetAgentType: 'agent-b',
                     content: 'ask the human something',
                     routePolicy: RoutePolicy.SEND_ANYWAY,
+                    // A's own dispatch metadata: must reach A's reply intact
+                    // even though B suspends on askUser before it replies.
+                    metadata: { caller: 'agent-a', tag: 'keep' },
                 });
                 return { status: AgentState.QUEUED };
             }),
@@ -278,6 +320,7 @@ describe('AC-TS-6: a sub-agent that calls askUser replies to its caller afterwar
                     return new AgentTaskResult({
                         status: AgentState.COMPLETED,
                         replyData: { userSaid: command.replyData as any },
+                        metadata: { agent: 'agent-b', tag: 'from-agent-b' },
                     });
                 }
                 await context.askUser('which one?');
@@ -320,6 +363,9 @@ describe('AC-TS-6: a sub-agent that calls askUser replies to its caller afterwar
                     targetAgentType: 'agent-b',
                     sourceAgentType: CLIENT_SOURCE_AGENT_TYPE,
                     parentMessageId: '',
+                    // The answering client's own metadata for this hop:
+                    // transient plumbing that must not leak through to A.
+                    metadata: { caller: 'should-not-leak', client_tag: 'should-not-leak' },
                 }),
                 '', AgentState.COMPLETED, 'the blue one'
             ).toDict())
@@ -332,6 +378,14 @@ describe('AC-TS-6: a sub-agent that calls askUser replies to its caller afterwar
         expect((toA[0] as ResumeCommand).replyData).toEqual({ userSaid: 'the blue one' });
         expect(toA[0].header.messageId).toBe('msg-a');
         expect(toA[0].header.sourceAgentType).toBe('agent-b');
+        // A's own dispatch metadata survives the askUser round-trip — it is NOT
+        // replaced by the answering client's resume metadata — and B's own
+        // returned metadata overrides same-named keys on top of it.
+        const replyMetadata = toA[0].header.metadata;
+        expect(replyMetadata.caller).toBe('agent-a');
+        expect(replyMetadata.tag).toBe('from-agent-b');
+        expect(replyMetadata.agent).toBe('agent-b');
+        expect(replyMetadata).not.toHaveProperty('client_tag');
     });
 });
 

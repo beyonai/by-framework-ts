@@ -100,6 +100,12 @@ export function buildExecutionRecordForAskAgentCommand(
         // and which group the reply belongs to — the resume message itself
         // describes the hop that woke it, not this dispatch.
         task_group_id: header.taskGroupId || '',
+        // The caller's original dispatch metadata, for the same reason and read
+        // back by the same code: this is the only durable record of what it was,
+        // so a resumed reply can restore it as the base layer instead of
+        // inheriting whatever message last woke this execution up (an askUser
+        // answer, or a sub-call's reply). See resolveReplyCommand.
+        metadata: { ...(header.metadata || {}) },
         stream_name: streamName,
         worker_id: '',
         target_agent_type: header.targetAgentType,

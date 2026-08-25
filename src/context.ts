@@ -665,6 +665,11 @@ export class AgentContext {
                     trace_id: this.traceId,
                     source_agent_type: this.currentAgentType,
                     task_group_id: taskGroupId,
+                    // Same reason as task_group_id: the sweeper's synthesized
+                    // failure reads this member's metadata back off its own
+                    // execution record, so the caller's metadata rides on the
+                    // stand-in reply exactly as it would on a real one.
+                    metadata: { ...taskMetadata },
                     stream_name: QueueNames.ctrl_stream(task.targetAgentType),
                     worker_id: '',
                     target_agent_type: task.targetAgentType,
@@ -711,6 +716,12 @@ export class AgentContext {
                 // caller and its group from this record, never from the resume
                 // header (which describes the hop that woke it).
                 task_group_id: taskGroupId,
+                // Same reason, same reader: this is the only durable record of
+                // the caller's original dispatch metadata, which resolveReplyCommand
+                // restores as the base layer of a resumed member's reply. Without
+                // it a group member that suspends before replying loses the
+                // caller's metadata even though a non-suspending sibling keeps it.
+                metadata: { ...taskMetadata },
                 stream_name: QueueNames.ctrl_stream(task.targetAgentType),
                 worker_id: '',
                 target_agent_type: task.targetAgentType,

@@ -439,6 +439,16 @@ export abstract class GatewayWorker {
      * `!!sourceAgentType && !isResume`) is what made an A -> B -> C chain
      * silently drop B's result on the floor.
      *
+     * `header.metadata` is restored the same way, as a full REPLACEMENT rather
+     * than a merge with the waking message's own metadata: the waking message
+     * (an askUser answer, or a sub-call's reply) is transient plumbing for that
+     * one hop, not something the caller ever sent or asked for. Leaking it would
+     * let a transient hop overwrite the caller's own data instead of being
+     * layered under taskResult.metadata the way enqueueAgentReturn's merge
+     * already does correctly. If the caller's metadata is missing from the
+     * snapshot (an execution recorded before this field existed), this degrades
+     * to an empty object rather than leaking the waking message's metadata.
+     *
      * A root execution's record names CLIENT_SOURCE_AGENT_TYPE as its source,
      * which is a marker rather than an agent type — it has to be excluded
      * explicitly, or every client-dispatched execution that ever resumes (an
@@ -470,7 +480,8 @@ export abstract class GatewayWorker {
                 taskGroupId: String(snapshot.task_group_id || ''),
                 userCode: header.userCode,
                 userName: header.userName,
-                metadata: header.metadata,
+                // Replacement, not a merge with header.metadata — see above.
+                metadata: { ...(snapshot.metadata || {}) },
                 traceParentSpanId: header.traceParentSpanId,
                 langfuseParentObservationId: header.langfuseParentObservationId,
             }),

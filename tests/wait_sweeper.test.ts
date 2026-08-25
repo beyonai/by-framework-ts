@@ -89,6 +89,8 @@ async function seedExecution(
         readonly parentMessageId?: string;
         readonly taskGroupId?: string;
         readonly sessionId?: string;
+        /** The CALLER's dispatch metadata, as the dispatch pipeline records it. */
+        readonly metadata?: Record<string, any>;
     }
 ): Promise<string> {
     const executionId = `exec-${params.messageId}`;
@@ -102,6 +104,7 @@ async function seedExecution(
         source_agent_type: params.sourceAgentType ?? '',
         target_agent_type: params.targetAgentType ?? '',
         task_group_id: params.taskGroupId ?? '',
+        metadata: params.metadata ?? {},
         stream_name: QueueNames.ctrl_stream(params.targetAgentType ?? ''),
         worker_id: params.workerId ?? '',
         status: 'QUEUED',
@@ -164,6 +167,8 @@ async function seedSingleCall(
         readonly childWorkerId?: string;
         readonly timeoutMs?: number;
         readonly callerStatus?: string;
+        /** The caller's dispatch metadata, persisted on the CHILD's record. */
+        readonly childMetadata?: Record<string, any>;
     } = {}
 ): Promise<void> {
     await seedExecution(harness, {
@@ -180,6 +185,7 @@ async function seedSingleCall(
         targetAgentType: CHILD_AGENT,
         parentMessageId: 'msg-caller',
         workerId: options.childWorkerId ?? 'worker-child',
+        metadata: options.childMetadata,
     });
     await register(harness, {
         parentMessageId: 'msg-caller',
@@ -302,7 +308,13 @@ describe('a callee that finished but was never heard (AC2)', () => {
 
     test('a finished callee with no stored result fails honestly rather than fabricating COMPLETED', async () => {
         const harness = buildHarness();
-        await seedSingleCall(harness, { childStatus: AgentState.COMPLETED });
+        await seedSingleCall(harness, {
+            childStatus: AgentState.COMPLETED,
+            // The caller's own dispatch metadata, persisted on the callee's
+            // execution record at initializeExecution() time: the synthesized
+            // failure must restore it instead of emitting an empty object.
+            childMetadata: { caller: 'original', request_id: 'req-1' },
+        });
 
         harness.redis.advanceTime(61_000);
         const outcomes = await harness.sweeper.sweepOnce();
@@ -311,6 +323,13 @@ describe('a callee that finished but was never heard (AC2)', () => {
         const [reply] = callerReplies(harness);
         expect(reply.status).toBe(AgentState.FAILED);
         expect(replyDataOf(reply).error_code).toBe(LivenessErrorCode.REPLY_LOST_RECOVERED);
+        // The caller's own metadata rides along the synthesized failure, the
+        // same as on every other reply shape reaching it — a caller that never
+        // gets a real reply at all must not also lose what it dispatched with.
+        expect(reply.header.metadata.caller).toBe('original');
+        expect(reply.header.metadata.request_id).toBe('req-1');
+        // The sweeper's own provenance keys still ride on top.
+        expect(reply.header.metadata.synthesized_by).toBe('wait_sweeper');
     });
 
     test('a CANCELLED callee is reported CANCELLED, not FAILED', async () => {

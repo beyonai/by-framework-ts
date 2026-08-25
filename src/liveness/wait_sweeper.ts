@@ -996,6 +996,11 @@ export class WaitIndexSweeper {
      * failure already puts them: a caller must not be able to tell a callee that
      * failed from one that never got to fail, or the two shapes drift apart and
      * callers grow a second error path.
+     *
+     * The reply's metadata is seeded from the callee's execution snapshot, where
+     * the dispatch persisted the CALLER's original metadata — not from an empty
+     * object. A caller that never gets a real reply at all still gets its own
+     * metadata back, consistent with every other reply shape reaching it.
      */
     private async synthesizeFailure(
         due: DueEntry,
@@ -1025,7 +1030,7 @@ export class WaitIndexSweeper {
             }),
             extraPayload: {},
             errorCode: params.errorCode,
-            metadata: {},
+            metadata: (params.child.metadata || {}) as Record<string, JsonValue>,
         });
         return emitted ? params.outcome : OUTCOME_UNROUTABLE;
     }
