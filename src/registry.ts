@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Redis } from 'ioredis';
 import { getRedis } from './redis_client';
 import { RegistryKeys } from './constants';
+import { isTerminalState } from './protocol/agent_state';
 
 function getLocalIpAddress(): string {
     const interfaces = os.networkInterfaces();
@@ -65,6 +66,83 @@ function decodeWorkerPresence(raw: string | null): DecodedPresence {
     } catch {
         return { token: raw, lastSeen: 0, isLegacy: true, ipAddress: '' };
     }
+}
+
+/**
+ * Read the token out of a scoped lock's stored value.
+ *
+ * The value is an object carrying a `token` field, because that is the shape
+ * by-framework-python's Redlock scripts write and parse; a bare token string is
+ * still accepted so a lock taken by an older/legacy writer can be released.
+ */
+function decodeLockToken(raw: string | null): string | null {
+    if (raw === null) return null;
+    try {
+        const payload = JSON.parse(raw) as unknown;
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            const stored = (payload as Record<string, unknown>).token;
+            return stored === null || stored === undefined ? null : String(stored);
+        }
+        if (payload === 1) return null;
+        return String(payload);
+    } catch {
+        return raw;
+    }
+}
+
+/**
+ * Claim `key` for `token` if nobody holds it (Redlock acquire half).
+ *
+ * The stored value must stay a JSON object carrying a "token" field: Python's
+ * `_RELEASE_LOCK_SCRIPT` / `_REFRESH_LOCK_SCRIPT` parse it that way, and these
+ * locks are shared across SDKs (a TS worker and a Python worker sweep the same
+ * wait-index shards), so a bare token string would decode as unparseable legacy
+ * data and leave the holder unable to release its own lock.
+ *
+ * Mirrors Python core/registry.py acquire_scoped_lock.
+ */
+export async function acquireScopedLock(
+    redis: Redis,
+    key: string,
+    token: string,
+    ttlSeconds: number
+): Promise<boolean> {
+    const stored = await redis.set(key, JSON.stringify({ token }), 'EX', ttlSeconds, 'NX');
+    return Boolean(stored);
+}
+
+/**
+ * Release a lock taken with acquireScopedLock(), if still owned. An empty token
+ * releases unconditionally.
+ *
+ * Python does this in a Lua script for atomicity; this SDK issues no EVAL
+ * anywhere (see the Cluster notes in constants.ts), so the check-then-delete is
+ * done client-side, exactly as releaseWorkerId() already does for the worker
+ * lease. The race it admits — the lock expiring between GET and DEL, and a
+ * second holder's fresh claim being deleted — costs at most one extra concurrent
+ * pass over a shard, which the sweeper is designed to tolerate anyway: every
+ * action a sweep takes is idempotent, and a duplicated synthesized reply is
+ * caught by the same wait-index gate that catches a duplicated real one. Nothing
+ * about correctness rests on this lock, only on not doing the same work twice.
+ */
+export async function releaseScopedLock(
+    redis: Redis,
+    key: string,
+    token: string
+): Promise<boolean> {
+    const raw = await redis.get(key);
+    if (raw === null) {
+        return token === '';
+    }
+    if (!token) {
+        await redis.del(key);
+        return true;
+    }
+    if (decodeLockToken(raw) !== token) {
+        return false;
+    }
+    await redis.del(key);
+    return true;
 }
 
 export class WorkerRegistry {
@@ -516,7 +594,15 @@ export class WorkerRegistry {
 
         const now = Date.now();
         current.status = status;
-        current.finished_at = now;
+        // Only a terminal status ends an execution. A suspended caller is
+        // persisted here as WAITING_AGENT / WAITING_USER and will be resumed
+        // later; stamping finished_at for it makes an execution that is still
+        // waiting look completed to latency / completed_count math.
+        // Mirrors Python core/registry.py mark_execution_finished():
+        //   if is_terminal_state(status): current["finished_at"] = now
+        if (isTerminalState(status)) {
+            current.finished_at = now;
+        }
         current.updated_at = now;
 
         const timeline = Array.isArray(current.timeline) ? current.timeline : [];

@@ -208,6 +208,15 @@ const group = await context.dispatchGroup({
 const results = await context.collectGroupResults(group.taskGroupId, 30);
 ```
 
+When `waitForReply` is true, each sub-task's target agent type is checked for an
+online worker first. A member with no online worker is not dispatched; instead a
+stand-in `FAILED` reply is sent on the caller's behalf once the handler returns,
+so the group's join accounting sees exactly one result per member and the caller
+is always resumed. The dispatcher itself never writes group results or
+increments `completed` — if it did, that increment could be the one that fills
+the group, leaving no reply to trigger the join and suspending the caller
+forever.
+
 ## Core API
 
 ### Redis
@@ -245,6 +254,22 @@ Default environment variables:
 | `BYAI_WORKER_CONCURRENCY` | Max worker concurrency, default `50` |
 | `BYAI_WORKER_FETCH_COUNT` | Batch size for fetching tasks, default `10` |
 | `BYAI_REDIS_MAX_CONNECTIONS` | Redis connection pool config (aligned with Python SDK) |
+
+Every worker also hosts a wait-index sweep, which resolves callers suspended on a
+`callAgent`/`dispatchGroup` whose reply never arrives (the callee's worker was
+killed, its reply was lost, or it is alive but produced nothing). It has two
+independently switched halves, and uses the `BY_FRAMEWORK_` prefix on purpose:
+its state lives in Redis and is shared with the Python/Java workers of the same
+deployment, so these are set once per deployment, not once per SDK.
+
+| Variable | Description |
+|----------|-------------|
+| `BY_FRAMEWORK_WAIT_SWEEPER_ENABLED` | **Compensation** — triage, synthesized replies, renewals, cancellation. Default **off**; this is the rollback switch for the whole liveness feature |
+| `BY_FRAMEWORK_WAIT_PRUNE_ENABLED` | **Pruning** — deletes wait entries whose score proves no triage could still succeed. Default **on**: nothing else removes an entry except the reply it was waiting for, so with both off every lost reply leaks one entry forever |
+| `BY_FRAMEWORK_WAIT_SWEEP_INTERVAL_SECONDS` | Compensation cadence, default `30` |
+| `BY_FRAMEWORK_WAIT_PRUNE_INTERVAL_SECONDS` | Prune cadence, default `3600` (also the loop cadence when compensation is off) |
+| `BY_FRAMEWORK_WAIT_RENEW_MAX_MULTIPLE` | A wait may be renewed until `original_deadline + (N-1) x timeout`, after which the callee is declared `CHILD_TIMEOUT` even though its worker is alive. Default `3` |
+| `BY_FRAMEWORK_WAIT_CANCEL_ON_TIMEOUT` | Ask a timed-out callee to stop, after the caller has already been resolved. Default **on**; failures never affect the wake-up |
 
 ### GatewayClient
 
@@ -381,9 +406,9 @@ The base class automatically handles:
 | `emitChunk(event, eventType?)` | Push streaming answer, default `answerDelta` |
 | `emitState(event, eventType?)` | Push state or reasoning log, default `reasoningLogDelta` |
 | `emitArtifact(event, eventType?)` | Push file artifacts |
-| `askUser(event)` | Request user input and mark task as waiting |
-| `callAgent(params)` | Call a downstream Agent |
-| `dispatchGroup(params)` | Dispatch multiple downstream tasks in parallel |
+| `askUser(event, options?)` | Request user input and mark task as waiting (`options.replyTimeoutMs` bounds the wait, default 7 days) |
+| `callAgent(params)` | Call a downstream Agent (`params.replyTimeoutMs` bounds the wait when `waitForReply`, default 1 hour) |
+| `dispatchGroup(params)` | Dispatch multiple downstream tasks in parallel (`params.replyTimeoutMs` applies per sub-task) |
 | `collectGroupResults(taskGroupId, timeout?)` | Collect results for a task group |
 | `checkCancelled()` | Throws `TaskCancelledError` if task was cancelled |
 | `isCancelRequested()` | Check for cancellation signal |
@@ -453,6 +478,10 @@ enum EventType {
     TASK_CREATE = "taskCreate",
     STEP_COMPLETE = "stepComplete",
     TASK_STOP = "taskStop",
+    // Diagnostic: a reply arrived for a wait that was already resolved and was
+    // dropped by the idempotency gate. The sub-agent did real work whose result
+    // nobody will consume, so the drop is reported rather than silent.
+    ORPHANED_REPLY = "orphanedReply",
 }
 ```
 

@@ -1,5 +1,6 @@
 import type { Redis } from 'ioredis';
-import { QueueNames } from '../constants';
+import { DEFAULT_REPLY_TIMEOUT_MS, QueueNames } from '../constants';
+import { registerWait } from '../liveness/wait_registration';
 import { AgentState } from '../protocol/agent_state';
 import { buildAskAgentPublishArtifacts, resolveCallAgentPublishIds, retargetAskAgentCommand } from './ask_agent_build';
 import { initializeQueuedExecution } from './execution_init';
@@ -74,6 +75,26 @@ export async function callAgent(
     executionRecord.route_status = availability.status;
     executionRecord.selected_agent_type = availability.selectedAgentType || '';
 
+    if (waitForReply && deps.waitIndex) {
+        // Registered alongside the execution record, i.e. BEFORE the control
+        // message goes out: the window that must not exist is "dispatched but
+        // nobody knows we are waiting" — a reply landing in that window passes
+        // the idempotency gate as unregistered and then leaves the entry behind
+        // it with nothing left to clear it. The opposite window (registered but
+        // the publish below fails) surfaces as a sweep finding a never-started
+        // child, which is exactly what it is.
+        //
+        // Registered for QUEUE_PENDING too: the command is held by the
+        // availability router and the caller is suspended either way.
+        await deps.waitIndex.register({
+            sessionId: input.sessionId,
+            parentMessageId,
+            childMessageId: messageId,
+            taskGroupId: input.taskGroupId || '',
+            timeoutMs: input.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
+        });
+    }
+
     if (availability.status === AvailabilityStatus.QUEUE_PENDING) {
         await deps.execution.init(executionRecord);
     } else {
@@ -136,6 +157,11 @@ export function createRedisCallAgentDeps(params: {
             },
         },
         queueNames,
+        waitIndex: {
+            async register(params) {
+                await registerWait(redis, params);
+            },
+        },
         availability: {
             async prepare(input, commandPayload, executionId, messageId) {
                 return router.prepareDelivery({

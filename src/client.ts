@@ -6,7 +6,7 @@ import { CancelSessionResponse, CancelTaskResponse, ExecutionStatus, SendMessage
 import { ActionType } from './protocol/action_type';
 import { AskAgentCommand, BaseCommand, CancelTaskCommand, ResumeCommand } from './protocol/commands';
 import { MessageHeader } from './protocol/message_header';
-import { QueueNames } from './constants';
+import { CLIENT_SOURCE_AGENT_TYPE, QueueNames } from './constants';
 import { initializeQueuedExecution } from './dispatch/execution_init';
 import { AvailabilityRouter, AvailabilityStatus, RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
 import { publishAskAgentCommand } from './dispatch/publish_ask_agent';
@@ -292,7 +292,7 @@ export class GatewayClient {
                     session_id: command.header.sessionId,
                     trace_id: command.header.traceId,
                     parent_message_id: command.header.parentMessageId || '',
-                    source_agent_type: command.header.sourceAgentType || 'client',
+                    source_agent_type: command.header.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE,
                     target_agent_type: command.header.targetAgentType,
                     stream_name: resolvedStreamName,
                     worker_id: '',
@@ -669,7 +669,7 @@ export class GatewayClient {
         if (!params.targetWorkerId) {
             const availability = await new AvailabilityRouter(this.redis, this.registry).prepareDelivery({
                 executionId, messageId, sessionId: requestParams.sessionId, traceId,
-                source: params.sourceAgentType || 'client', targetAgentType: requestParams.targetAgentType,
+                source: params.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE, targetAgentType: requestParams.targetAgentType,
                 userCode: requestParams.userCode, region: params.region, priority: params.priority,
                 policy: routePolicy, timeoutMs: params.availabilityTimeoutMs,
                 commandPayload: command.toDict() as Record<string, unknown>, metadata,
@@ -680,7 +680,7 @@ export class GatewayClient {
                 await initializeQueuedExecution(this.registry, {
                     execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
                     trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
-                    source_agent_type: params.sourceAgentType || 'client', target_agent_type: requestParams.targetAgentType,
+                    source_agent_type: params.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE, target_agent_type: requestParams.targetAgentType,
                     stream_name: '', worker_id: '', status: 'FAILED', route_policy: routePolicy,
                     route_status: availability.status, availability_error: error,
                     availability_error_code: availability.errorCode || ExecutionStatus.ERR_AGENT_TYPE_UNAVAILABLE,
@@ -707,7 +707,7 @@ export class GatewayClient {
                 session_id: requestParams.sessionId,
                 trace_id: traceId,
                 parent_message_id: requestParams.parentMessageId || '',
-                source_agent_type: params.sourceAgentType || 'client',
+                source_agent_type: params.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE,
                 target_agent_type: requestParams.targetAgentType,
                 stream_name: route.streamName,
                 worker_id: '',
@@ -721,7 +721,7 @@ export class GatewayClient {
             await initializeQueuedExecution(this.registry, {
                 execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
                 trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
-                source_agent_type: params.sourceAgentType || 'client', target_agent_type: requestParams.targetAgentType,
+                source_agent_type: params.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE, target_agent_type: requestParams.targetAgentType,
                 stream_name: route.streamName, worker_id: '', status: 'QUEUED', cancel_requested: false,
                 cancel_reason: '', route_policy: routePolicy, route_status: routeStatus,
             }).catch(() => undefined);
@@ -730,7 +730,7 @@ export class GatewayClient {
             await initializeQueuedExecution(this.registry, {
                 execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
                 trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
-                source_agent_type: params.sourceAgentType || 'client', target_agent_type: requestParams.targetAgentType,
+                source_agent_type: params.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE, target_agent_type: requestParams.targetAgentType,
                 stream_name: route.streamName, worker_id: '', status: 'QUEUED', cancel_requested: false,
                 cancel_reason: '', route_policy: routePolicy, route_status: routeStatus,
             }).catch(() => undefined);
@@ -796,7 +796,7 @@ export class GatewayClient {
                 messageId:      params.messageId,
                 parentMessageId: params.parentMessageId,
                 workerId:       params.targetWorkerId,
-                sourceAgentType: 'client',
+                sourceAgentType: CLIENT_SOURCE_AGENT_TYPE,
                 targetAgentType: params.targetAgentType,
                 routePolicy:    params.routePolicy,
                 routeStatus:    params.routeStatus,

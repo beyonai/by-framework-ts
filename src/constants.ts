@@ -313,6 +313,84 @@ export class RegistryKeys {
     return versioned(`byai_gateway:session:${sessionId}:registry`, `session:{${sessionId}}:registry`);
   }
 
+  // --- Suspended-caller liveness (wait index) ---
+  // Cross-SDK wire contract: the four keys below must be spelled identically
+  // in Python/TS/Java, because any SDK's sweeper may resolve another SDK's
+  // entry. See by-framework-python common/constants.py RedisKeys.wait_*.
+
+  /**
+   * ZSET index of suspended callers waiting for a sub-task reply.
+   *
+   * member = encoded wait-index member (see src/liveness/wait_index.ts),
+   * score = deadline in epoch milliseconds. Sharded so sweepers can claim
+   * disjoint slices without a global lock; the shard is derived from
+   * session_id (see waitIndexShard()).
+   *
+   * Cross-entity index (spans every session), so deliberately left untagged
+   * relative to the per-session keys it points at — same rule as
+   * trace_index_session / known_workers.
+   */
+  static wait_index(shard: number): string {
+    return versioned(`byai_gateway:wait:index:${shard}`, `wait:index:${shard}`);
+  }
+
+  /**
+   * Short-lived claim on one wait_index() shard, held while sweeping it.
+   *
+   * Ownership is advisory: it only keeps two sweepers from doing the same
+   * triage at the same moment. Losing it (expiry, a partitioned worker)
+   * cannot corrupt anything, because every action a sweep takes is
+   * idempotent — a duplicate synthesized reply is caught by the same
+   * wait-index gate that catches a duplicate real one. That is why the shards
+   * need no leader election.
+   *
+   * Cross-entity like the shard it guards, so deliberately untagged.
+   */
+  static wait_sweep_lock(shard: number): string {
+    return versioned(`byai_gateway:wait:sweep_lock:${shard}`, `wait:sweep_lock:${shard}`);
+  }
+
+  /**
+   * Short-lived marker: "this wait-index entry was already resolved".
+   *
+   * Written by the idempotency gate right after it wins the ZREM for a member,
+   * and read when a later ZREM for the same member returns 0. It is the *only*
+   * thing that distinguishes the two meanings of that 0 — "someone already
+   * consumed this wait" (drop the duplicate) from "this wait was never
+   * registered" (a pre-upgrade or expired entry, which must be let through).
+   * Without it, every rolling upgrade would silently drop in-flight replies.
+   *
+   * Per-session entity, so hash-tagged with the session in v2.
+   */
+  static wait_consumed(sessionId: string, memberDigest: string): string {
+    return versioned(
+      `byai_gateway:wait:consumed:${sessionId}:${memberDigest}`,
+      `wait:consumed:{${sessionId}}:${memberDigest}`
+    );
+  }
+
+  /**
+   * The deadline a wait's renewal budget is measured from.
+   *
+   * Written once (SET NX) by the first sweep that finds the entry due, so it
+   * holds the wait's *original* deadline even after renewals have overwritten
+   * the ZSET score. Without it a renewal budget cannot exist at all: every
+   * sweep would re-measure from the score it just pushed out, and a callee
+   * whose worker is alive but making no progress would be renewed forever.
+   *
+   * Sweeper-private: nothing on the reply path reads or writes it, so it is
+   * deliberately NOT part of the wait-index member (which must stay
+   * rebuildable from a reply alone — see src/liveness/wait_index.ts).
+   *
+   * Per-session entity, so hash-tagged with the session in v2.
+   */
+  static wait_renew_origin(sessionId: string, memberDigest: string): string {
+    return versioned(
+      `byai_gateway:wait:renew_origin:${sessionId}:${memberDigest}`,
+      `wait:renew_origin:{${sessionId}}:${memberDigest}`
+    );
+  }
+
 }
 
 export class ConsumerGroups {
@@ -325,7 +403,38 @@ export class ConsumerGroups {
 export const MESSAGE_ID_PREFIX = 'msg-';
 export const EXECUTION_ID_PREFIX = 'exec-';
 export const TASK_GROUP_ID_PREFIX = 'tg-';
+/**
+ * A single callAgent (non-group) dispatch stores its result in the same
+ * task_group_results Hash a real group uses, under a group id derived from the
+ * sub-task's own message_id — i.e. a group of size 1. Keeps one result
+ * storage/recovery path instead of two.
+ *
+ * Cross-SDK wire contract: Python/TS/Java must use this exact prefix, since a
+ * sweeper in any of them recovers a lost reply from this storage.
+ */
+export const TASK_GROUP_SINGLE_ID_PREFIX = 'tg-single-';
 export const CANCEL_MESSAGE_ID_PREFIX = 'msg-cancel-';
+
+/** Group id under which a single (non-group) callAgent result is stored. */
+export function singleCallTaskGroupId(childMessageId: string): string {
+  return `${TASK_GROUP_SINGLE_ID_PREFIX}${childMessageId}`;
+}
+
+/**
+ * Sentinel GatewayClient writes as an execution record's source_agent_type for
+ * a dispatch it made itself. It is NOT an agent type: nothing declares it, so
+ * nothing consumes QueueNames.ctrl_stream(CLIENT_SOURCE_AGENT_TYPE).
+ *
+ * Load-bearing wherever a resumed execution recovers its caller from its own
+ * record instead of from the resume header: a root execution's record carries
+ * this, and treating it as a caller both posts the result to a stream no one
+ * reads and suppresses the end-of-stream event the session data plane owes the
+ * user.
+ *
+ * Cross-SDK: Python writes the same literal; Java writes no field at all, so a
+ * missing field must be treated as "no caller" too.
+ */
+export const CLIENT_SOURCE_AGENT_TYPE = 'client';
 
 // --- Redis Hash Field Prefixes ---
 // Session Registry hash field prefixes
@@ -336,6 +445,16 @@ export const MSG_MAP_PREFIX = 'msg_map:';
 export const TASK_GROUP_FIELD_TOTAL = 'total';
 export const TASK_GROUP_FIELD_COMPLETED = 'completed';
 export const TASK_GROUP_FIELD_SOURCE_AGENT = 'source_agent_type';
+/**
+ * Set when a group's fan-out threw partway through, so the caller was failed
+ * with siblings already dispatched. Their replies must then be discarded rather
+ * than joined — the execution they would resume is gone — and a sweep must
+ * clean an orphaned member up instead of compensating it.
+ *
+ * Cross-runtime: the task_group hash is read by Python/TS/Java alike, so this
+ * field must be honoured even by an SDK whose own dispatcher never writes it.
+ */
+export const TASK_GROUP_FIELD_ABORTED = 'aborted';
 
 // --- Timing Constants ---
 /** Control loop sleep interval (seconds) */
@@ -348,6 +467,120 @@ export const TASK_GROUP_TTL_SECONDS = 86400;
 export const FIRST_RETRY_WAIT_SECONDS = 1.0;
 /** Maximum retry count */
 export const MAX_RETRY_COUNT = 3;
+
+// --- Suspended-caller liveness (wait index) ---
+// Values below are a cross-SDK contract (see
+// .trellis/tasks/08-24-suspended-parent-liveness/research/cross-sdk-wire-contract.md
+// §6) and are mirrored byte-for-byte from by-framework-python
+// common/constants.py. Do not retune one SDK in isolation.
+
+/**
+ * Number of RegistryKeys.wait_index() shards. Fixed: changing it re-maps every
+ * session to a different shard, so in-flight entries would be swept by no one.
+ * Treat as a cross-SDK protocol constant, not a tunable.
+ */
+export const WAIT_INDEX_SHARDS = 16;
+/**
+ * Default deadline for a callAgent(waitForReply=true) reply (1 hour).
+ * Machine waiting on machine.
+ */
+export const DEFAULT_REPLY_TIMEOUT_MS = 3_600_000;
+/**
+ * Default deadline for an askUser reply. Machine waiting on a human, so it is
+ * deliberately decoupled from DEFAULT_REPLY_TIMEOUT_MS and aligned with the
+ * session TTL (which is in seconds) instead.
+ */
+export const DEFAULT_ASK_USER_TIMEOUT_MS = RegistryKeys.DEFAULT_SESSION_TTL * 1000;
+/** How often a worker's sweeper scans the shards it owns (seconds). */
+export const WAIT_SWEEP_INTERVAL_SECONDS = 30;
+/**
+ * TTL of a RegistryKeys.wait_sweep_lock() claim. Must comfortably exceed one
+ * shard's sweep so the owner doesn't lose the shard mid-pass, and stay short
+ * enough that a crashed sweeper's shards are picked up again quickly.
+ */
+export const WAIT_SWEEP_LOCK_TTL_SECONDS = 60;
+/**
+ * Most due entries one sweep resolves per shard per cycle. Bounds the work of a
+ * single pass after an outage leaves a large backlog; the remainder is picked
+ * up next cycle, since entries stay in the index until a reply clears them.
+ */
+export const WAIT_SWEEP_BATCH_LIMIT = 200;
+/**
+ * Fixed extension applied when a sweep finds the callee still making progress.
+ * Deliberately a constant rather than the original timeout: the wait-index
+ * member must stay reconstructible from a reply alone, so it cannot carry the
+ * caller's original timeout.
+ */
+export const WAIT_RENEW_INCREMENT_MS = 300_000;
+/**
+ * Hard ceiling on renewals, as a multiple of the caller's own timeout: a wait
+ * may be renewed until `registered_at + N * timeout`, after which the callee is
+ * declared CHILD_TIMEOUT even though its worker is still alive. Without a
+ * ceiling, a callee that is running but making no progress suspends its caller
+ * forever — the one failure mode the deadline was supposed to bound.
+ */
+export const WAIT_RENEW_MAX_MULTIPLE = 3;
+/**
+ * TTL of RegistryKeys.wait_renew_origin(). Must comfortably exceed the largest
+ * budget in use (N * timeout), or the budget silently restarts mid-wait.
+ */
+export const WAIT_RENEW_ORIGIN_TTL_SECONDS = TASK_GROUP_TTL_SECONDS;
+/**
+ * How long RegistryKeys.wait_consumed() remembers that a wait was already
+ * resolved, i.e. how far apart two copies of the same reply may be and still be
+ * recognized as duplicates.
+ *
+ * Sized off DEFAULT_SESSION_TTL because that is the lifetime of the session
+ * registry, which is what keeps a wait entry relevant. A marker that expires
+ * while entries of that session are still live leaves two holes, the second
+ * being the dangerous one: a stale duplicate sub-agent reply, having lost the
+ * marker that would stop it at its own candidate, falls through to the askUser
+ * candidate for the same caller and claims a wait that is still live — after
+ * which the real answer is dropped as "already consumed".
+ */
+export const WAIT_CONSUMED_TTL_SECONDS = RegistryKeys.DEFAULT_SESSION_TTL;
+/**
+ * How often a sweeper prunes entries that are provably beyond use. Deliberately
+ * far coarser than WAIT_SWEEP_INTERVAL_SECONDS: this is garbage collection on a
+ * multi-day horizon, and it is the only work a sweeper does when compensation
+ * is off.
+ */
+export const WAIT_PRUNE_INTERVAL_SECONDS = 3600;
+/**
+ * How far in the past a wait entry's score must lie before pruning it.
+ *
+ * Every writer sets an entry's score to its own `now` plus a non-negative
+ * offset, and only while the caller's execution record exists. So
+ * `now - score > this` proves the session registry a sweep would interrogate
+ * has expired and no triage is possible any more — pruning is therefore not a
+ * decision, which is why it needs no opt-in. The margin over
+ * DEFAULT_SESSION_TTL is what makes that strict rather than coincident:
+ * DEFAULT_ASK_USER_TIMEOUT_MS *equals* the session TTL, so a threshold trimmed
+ * to it exactly would land on the boundary of a live askUser wait and lose to
+ * any clock skew between the worker that registered the entry and the one
+ * sweeping it.
+ */
+export const WAIT_PRUNE_AFTER_SECONDS = RegistryKeys.DEFAULT_SESSION_TTL + 86400;
+
+/**
+ * error_code values carried by synthesized/recovered resume replies.
+ *
+ * Cross-SDK wire contract — Python/TS/Java must emit the same strings; callers
+ * match on them. Append only, never rename.
+ */
+export enum LivenessErrorCode {
+  /** The callee's worker lease expired while its execution was non-terminal. */
+  CHILD_WORKER_LOST = 'CHILD_WORKER_LOST',
+  /** The callee was alive but produced no reply before the deadline. */
+  CHILD_TIMEOUT = 'CHILD_TIMEOUT',
+  /** The dispatch was never picked up by any worker. */
+  CHILD_NEVER_STARTED = 'CHILD_NEVER_STARTED',
+  /**
+   * The callee finished and its result was persisted, but the reply message was
+   * lost; the result was recovered from storage.
+   */
+  REPLY_LOST_RECOVERED = 'REPLY_LOST_RECOVERED',
+}
 
 // --- Filesystem Constants ---
 export const DEFAULT_WORKSPACE_DIR = 'workspace';

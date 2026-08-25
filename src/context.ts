@@ -1,6 +1,17 @@
 import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { QueueNames, TASK_GROUP_FIELD_TOTAL, TASK_GROUP_FIELD_COMPLETED, TASK_GROUP_TTL_SECONDS } from './constants';
+import {
+    DEFAULT_ASK_USER_TIMEOUT_MS,
+    DEFAULT_REPLY_TIMEOUT_MS,
+    QueueNames,
+    TASK_GROUP_FIELD_ABORTED,
+    TASK_GROUP_FIELD_TOTAL,
+    TASK_GROUP_FIELD_COMPLETED,
+    TASK_GROUP_TTL_SECONDS,
+} from './constants';
+import { registerWait } from './liveness/wait_registration';
+import { SYNTHESIZED_BY_DISPATCH, failureReplyData, standInReply } from './liveness/wait_reply';
+import type { ResumeCommand } from './protocol/commands';
 import { createRedisCallAgentDeps, callAgent as publishCallAgent } from './dispatch/dispatch_ask_agent';
 import { RoutePolicy, type RoutePolicy as RoutePolicyType } from './availability';
 import type { CallAgentPublishInput } from './dispatch/types';
@@ -57,6 +68,13 @@ export interface CallAgentParams {
     readonly availabilityTimeoutMs?: number;
     readonly region?: string;
     readonly priority?: number;
+    /**
+     * How long this execution may stay suspended waiting for the reply before
+     * the liveness sweep resolves it. Only meaningful when waitForReply is
+     * true (the caller does not suspend otherwise); defaults to
+     * DEFAULT_REPLY_TIMEOUT_MS.
+     */
+    readonly replyTimeoutMs?: number;
 }
 
 interface DispatchedTask {
@@ -84,7 +102,29 @@ export class AgentContext {
     private responseBuffer: ReadonlyArray<string> = [];
     private historySaved = false;
     private _isSuspended = false;
+    /**
+     * WHY this execution is suspended, as the AgentState it is waiting in
+     * (WAITING_AGENT / WAITING_USER), or '' when it is not suspended.
+     *
+     * The framework persists this instead of whatever non-terminal status the
+     * business returned, so a suspended caller is distinguishable from one that
+     * is merely QUEUED behind a worker. A plain boolean cannot carry that
+     * distinction, and the distinction is what a sweep's triage keys off:
+     * "waiting on a human" is never compensated, "waiting on an agent" is.
+     * Kept in lockstep with `_isSuspended` — both are set together.
+     */
+    private _suspendedState = '';
     private _permissionTransferred = false;
+    /**
+     * Stand-in replies for Task Group members that never reached a worker,
+     * queued here instead of being sent from the dispatch loop.
+     *
+     * See liveness/wait_reply.flushPendingGroupReplies for why not inline: a
+     * reply sent inside dispatchGroup lands on the caller's own control stream
+     * strictly before the caller suspends, which turns a rare race into a
+     * certain one.
+     */
+    private _pendingGroupReplies: ResumeCommand[] = [];
     private _isStreamFinished = false;
     private _isFinalAnswerEmitted = false;
 
@@ -144,8 +184,31 @@ export class AgentContext {
         return this._isSuspended;
     }
 
+    /**
+     * The AgentState a suspended execution is waiting in (WAITING_AGENT /
+     * WAITING_USER), or '' when it is not suspended.
+     */
+    suspendedState(): string {
+        return this._suspendedState;
+    }
+
     isPermissionTransferred(): boolean {
         return this._permissionTransferred;
+    }
+
+    /**
+     * Hand over the queued dispatch-failure stand-ins, clearing the queue.
+     *
+     * Draining rather than reading is deliberate: whoever takes them owns
+     * delivering them, and a second flush (the worker path and a nested
+     * processor path both call it) must not send a duplicate of a reply that is
+     * already on the wire — the gate would then drop the *real* sibling reply
+     * that follows as "already consumed".
+     */
+    takePendingGroupReplies(): ResumeCommand[] {
+        const pending = this._pendingGroupReplies;
+        this._pendingGroupReplies = [];
+        return pending;
     }
 
     isStreamFinished(): boolean {
@@ -291,13 +354,43 @@ export class AgentContext {
         });
     }
 
-    async askUser(event: AskUserEvent | string): Promise<{ readonly status: string }> {
+    /**
+     * Suspend execution and ask the user for a prompt.
+     *
+     * `replyTimeoutMs` bounds how long this execution may stay suspended before
+     * the liveness sweep resolves it; it defaults to
+     * DEFAULT_ASK_USER_TIMEOUT_MS, which is deliberately much larger than
+     * callAgent's default because this one waits on a human.
+     *
+     * Wait-index convention (mirrored by the Python/Java ports): an askUser
+     * wait has no sub-task, so its member's `childMessageId` is the empty
+     * string, and its `parentMessageId` is this execution's own message_id —
+     * which is what the client's ResumeCommand carries as `header.messageId`
+     * when the user answers.
+     */
+    async askUser(
+        event: AskUserEvent | string,
+        options: { readonly replyTimeoutMs?: number } = {}
+    ): Promise<{ readonly status: string }> {
+        // Registered BEFORE the prompt goes out, for the same reason the
+        // dispatch pipeline registers before its xadd: the answer can come back
+        // the instant the prompt is visible, and an answer that arrives before
+        // the entry exists passes the gate as unregistered and then leaves the
+        // entry behind it with nothing left to clear it.
+        await registerWait(this.redis, {
+            sessionId: this.sessionId,
+            parentMessageId: this.currentMessageId,
+            childMessageId: '',
+            taskGroupId: '',
+            timeoutMs: options.replyTimeoutMs ?? DEFAULT_ASK_USER_TIMEOUT_MS,
+        });
         await this.emitter.askUser(this.sessionId, this.traceId, event, {
             sourceAgentType: this.currentAgentType,
             messageId: this.currentMessageId,
             parentMessageId: this.resolveCurrentParentMessageId(),
         });
         this._isSuspended = true;
+        this._suspendedState = AgentState.WAITING_USER;
         return { status: AgentState.WAITING_USER };
     }
 
@@ -352,6 +445,10 @@ export class AgentContext {
             availabilityTimeoutMs: params.availabilityTimeoutMs,
             region: params.region,
             priority: params.priority,
+            // Only consulted when waitForReply is true; the pipeline registers
+            // the wait-index entry itself, next to initializeExecution and
+            // before the ctrl publish.
+            replyTimeoutMs: params.replyTimeoutMs,
             langfuseParentObservationId: this.traceParentObservationId || '',
         };
 
@@ -391,8 +488,14 @@ export class AgentContext {
             };
         }
 
+        // NOTE: this assignment sits AFTER the availability-rejection early
+        // return above, so a dispatch that never happened cannot leave the
+        // context looking suspended. Python needed an explicit snapshot/rollback
+        // here precisely because its equivalent runs before the check — do not
+        // "port" that rollback back into this file, and do not hoist this.
         if (raw.runtimeHint === 'suspend' || params.waitForReply !== false) {
             this._isSuspended = true;
+            this._suspendedState = AgentState.WAITING_AGENT;
         } else if (raw.runtimeHint === 'transfer') {
             this._permissionTransferred = true;
         }
@@ -468,8 +571,14 @@ export class AgentContext {
         readonly waitForReply?: boolean;
         readonly messageId?: string;
         readonly parentMessageId?: string;
+        /**
+         * Per-sub-task reply deadline; each member of the group gets its own
+         * wait-index entry with this timeout, since each can go missing
+         * independently. Defaults to DEFAULT_REPLY_TIMEOUT_MS.
+         */
+        readonly replyTimeoutMs?: number;
     }): Promise<DispatchGroupResult> {
-        const { tasks, waitForReply = true, messageId, parentMessageId } = params;
+        const { tasks, waitForReply = true, messageId, parentMessageId, replyTimeoutMs } = params;
 
         if (!tasks || tasks.length === 0) {
             return { status: 'EMPTY', taskGroupId: '', dispatchedTasks: [] };
@@ -489,6 +598,7 @@ export class AgentContext {
             });
             await this.redis.expire(groupKey, TASK_GROUP_TTL_SECONDS);
             this._isSuspended = true;
+            this._suspendedState = AgentState.WAITING_AGENT;
         } else {
             this._permissionTransferred = true;
         }
@@ -535,6 +645,60 @@ export class AgentContext {
                 await this.pluginRegistry.onCallAgentStart(this, command);
             }
 
+            // Availability check, waiting members only. A member whose target
+            // agent type has no online worker used to be XADDed into a control
+            // stream nobody consumes: the group's `completed` could then never
+            // reach `total` and the caller hung with no dispatch-time signal at
+            // all. Probed only when `wait` is true because that is the only case
+            // with group accounting to starve — a fire-and-forget fan-out keeps
+            // its previous behaviour exactly.
+            const memberOnline = wait ? await this._probeGroupMemberOnline(task.targetAgentType) : null;
+            if (memberOnline && !memberOnline.ok) {
+                // Recorded FAILED rather than QUEUED: this is the record a sweep
+                // reads to decide the member provably cannot answer. Mirrors the
+                // REJECT branch of the single-dispatch pipeline.
+                await dispatchRegistry.initializeExecution({
+                    execution_id: `exec-${uuidv4().slice(0, 8)}`,
+                    message_id: currentMessageId,
+                    parent_message_id: currentParentMessageId,
+                    session_id: this.sessionId,
+                    trace_id: this.traceId,
+                    source_agent_type: this.currentAgentType,
+                    task_group_id: taskGroupId,
+                    stream_name: QueueNames.ctrl_stream(task.targetAgentType),
+                    worker_id: '',
+                    target_agent_type: task.targetAgentType,
+                    status: AgentState.FAILED,
+                    availability_error: memberOnline.error,
+                    availability_error_code: memberOnline.errorCode,
+                    cancel_requested: false,
+                    cancel_reason: '',
+                });
+                await this._queueUndispatchedMemberFailure({
+                    taskGroupId,
+                    callerMessageId: currentParentMessageId,
+                    childMessageId: currentMessageId,
+                    targetAgentType: task.targetAgentType,
+                    error: memberOnline.error,
+                    errorCode: memberOnline.errorCode,
+                    metadata: taskMetadata,
+                    replyTimeoutMs,
+                });
+                if (this.pluginRegistry) {
+                    await this.pluginRegistry.onCallAgentError(
+                        this, command, new Error(memberOnline.error)
+                    );
+                }
+                // Still reported as dispatched: the group has `tasks.length`
+                // members and exactly one accounting event is coming for this
+                // one (the stand-in), same as for every sibling.
+                dispatchedTasks.push({
+                    message_id: currentMessageId,
+                    target_agent_type: task.targetAgentType,
+                });
+                continue;
+            }
+
             // Initialize execution record for each dispatched task
             await dispatchRegistry.initializeExecution({
                 execution_id: `exec-${uuidv4().slice(0, 8)}`,
@@ -543,6 +707,10 @@ export class AgentContext {
                 session_id: this.sessionId,
                 trace_id: this.traceId,
                 source_agent_type: wait ? this.currentAgentType : '',
+                // Needed on resume: a sub-task that itself suspends recovers its
+                // caller and its group from this record, never from the resume
+                // header (which describes the hop that woke it).
+                task_group_id: taskGroupId,
                 stream_name: QueueNames.ctrl_stream(task.targetAgentType),
                 worker_id: '',
                 target_agent_type: task.targetAgentType,
@@ -550,6 +718,21 @@ export class AgentContext {
                 cancel_requested: false,
                 cancel_reason: '',
             });
+
+            if (wait) {
+                // One entry per sibling — each sub-task can go missing
+                // independently, and childMessageId is the only per-sibling
+                // unique field, so a shared entry would be claimed once and the
+                // rest of the group would hang. Registered before the xadd for
+                // the same reason as the single-dispatch path.
+                await registerWait(this.redis, {
+                    sessionId: this.sessionId,
+                    parentMessageId: currentParentMessageId,
+                    childMessageId: currentMessageId,
+                    taskGroupId,
+                    timeoutMs: replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
+                });
+            }
 
             const dispatchStartTs = Date.now();
             try {
@@ -562,6 +745,28 @@ export class AgentContext {
             } catch (error: any) {
                 if (this.pluginRegistry) {
                     await this.pluginRegistry.onCallAgentError(this, command, error instanceof Error ? error : new Error(String(error)));
+                }
+                // A genuine dispatch-time failure (not an availability-check
+                // rejection, which the branch above already turns into a
+                // stand-in reply instead of throwing). Stop fanning out and mark
+                // the group aborted, so the siblings already sent don't later
+                // resume this — now failed — caller execution, and so a sweep
+                // cleans their orphaned wait entries up instead of compensating
+                // them. Stand-ins queued so far die with the throw: the worker
+                // only flushes them once processCommand returns normally.
+                // Mirrors Python context.py's dispatch_group.
+                if (wait) {
+                    try {
+                        await this.redis.hset(
+                            QueueNames.task_group(taskGroupId),
+                            TASK_GROUP_FIELD_ABORTED,
+                            '1'
+                        );
+                    } catch (markError) {
+                        console.warn(
+                            `[AgentContext] Could not mark Task Group ${taskGroupId} aborted: ${markError}`
+                        );
+                    }
                 }
                 throw error;
             }
@@ -626,6 +831,120 @@ export class AgentContext {
             taskGroupId,
             dispatchedTasks,
         };
+    }
+
+    /**
+     * Is there an online worker for this group member's target agent type?
+     *
+     * Fail-soft in the *dispatch* direction: if the probe itself errors we
+     * report the member as reachable and let the XADD go out. A probe outage
+     * must not turn every member of every group into a synthesized failure.
+     */
+    private async _probeGroupMemberOnline(
+        targetAgentType: string
+    ): Promise<{ ok: boolean; error: string; errorCode: string }> {
+        try {
+            const { WorkerRegistry } = await import('./registry');
+            const [online] = await new WorkerRegistry(this.redis).hasOnlineAgentType(targetAgentType);
+            if (online) {
+                return { ok: true, error: '', errorCode: '' };
+            }
+            return {
+                ok: false,
+                error: `No alive worker found with agent type '${targetAgentType}'`,
+                errorCode: 'AGENT_TYPE_NOT_FOUND',
+            };
+        } catch (error) {
+            console.warn(
+                `[AgentContext] Availability probe failed for agent type '${targetAgentType}', `
+                + `dispatching anyway: ${error}`
+            );
+            return { ok: true, error: '', errorCode: '' };
+        }
+    }
+
+    /**
+     * Handle a group member whose target agent type was unavailable.
+     *
+     * No worker will ever reply for this sub-task, so the group needs one more
+     * result from somewhere. It must NOT be booked here. Writing
+     * task_group_results and HINCRBYing `completed` from the dispatch loop is a
+     * second implementation of the accounting that lives in GatewayWorker's
+     * Group Join, and when *that* copy is the increment that reaches `total`
+     * there is no reply left to trigger the join and the caller stays suspended
+     * forever. Two paths reach it: every target being unavailable, and a sibling
+     * replying fast enough that a later unavailable target's increment is the
+     * one that fills the group.
+     *
+     * So the compensation is a *reply* — the one a sub-agent would have sent had
+     * it started and failed — and the join stores it, counts it and aggregates
+     * through the single path it already owns. The last accounting event is then
+     * always a reply, so the join always runs.
+     *
+     * A wait-index entry is registered for it as well, even though nothing was
+     * dispatched. It costs one ZADD, and it buys the only backstop this path
+     * has: if the stand-in is never delivered (the flush is fail-soft by
+     * necessity — see flushPendingGroupReplies), the sweep finds this member's
+     * execution recorded FAILED and compensates it like any other lost reply,
+     * instead of the group hanging on a member that provably cannot answer.
+     * Relying on the gate's ALLOW_UNREGISTERED instead would mean a lost
+     * stand-in leaves nothing at all behind, i.e. this fix opening a new hole of
+     * its own.
+     *
+     * Mirrors Python context.py's _queue_undispatched_member_failure.
+     */
+    private async _queueUndispatchedMemberFailure(params: {
+        readonly taskGroupId: string;
+        readonly callerMessageId: string;
+        readonly childMessageId: string;
+        readonly targetAgentType: string;
+        readonly error: string;
+        readonly errorCode: string;
+        readonly metadata?: Readonly<Record<string, unknown>>;
+        readonly replyTimeoutMs?: number;
+    }): Promise<void> {
+        await registerWait(this.redis, {
+            sessionId: this.sessionId,
+            parentMessageId: params.callerMessageId,
+            childMessageId: params.childMessageId,
+            taskGroupId: params.taskGroupId,
+            timeoutMs: params.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
+        });
+        if (!this.currentAgentType) {
+            // Nothing to address the reply to: this context has no agent type,
+            // so a real sub-agent could not have replied either (its dispatch
+            // carried an empty sourceAgentType). The wait entry above is what
+            // gets this group unstuck.
+            console.warn(
+                `[AgentContext] Task Group ${params.taskGroupId} sub-task ${params.childMessageId} `
+                + `cannot be compensated inline: this context has no agent type to address the `
+                + `reply to. Leaving it to the wait-index sweep.`
+            );
+            return;
+        }
+        const currentHeader = this.currentCommand instanceof AskAgentCommand
+            ? this.currentCommand.header
+            : undefined;
+        this._pendingGroupReplies.push(standInReply({
+            sessionId: this.sessionId,
+            callerMessageId: params.callerMessageId,
+            callerAgentType: this.currentAgentType,
+            childMessageId: params.childMessageId,
+            childAgentType: params.targetAgentType,
+            taskGroupId: params.taskGroupId,
+            traceId: this.traceId,
+            status: AgentState.FAILED,
+            replyData: failureReplyData({
+                error: params.error,
+                errorCode: params.errorCode || 'AGENT_TYPE_UNAVAILABLE',
+                childMessageId: params.childMessageId,
+            }),
+            metadata: (params.metadata ?? {}) as Record<string, any>,
+            errorCode: params.errorCode,
+            synthesizedBy: SYNTHESIZED_BY_DISPATCH,
+            userCode: currentHeader?.userCode,
+            userName: currentHeader?.userName,
+        }));
     }
 
     /**

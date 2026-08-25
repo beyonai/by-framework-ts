@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { QueueNames } from '../constants';
+import { CLIENT_SOURCE_AGENT_TYPE, QueueNames } from '../constants';
 import { AskAgentCommand } from '../protocol/commands';
 import { MessageHeader } from '../protocol/message_header';
 import type { AskAgentQueueNames } from './ports';
@@ -86,7 +86,7 @@ export function buildExecutionRecordForAskAgentCommand(
     const header = command.header;
     const source =
         sourceAgentFallback === 'client'
-            ? (header.sourceAgentType || 'client')
+            ? (header.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE)
             : header.sourceAgentType;
     return {
         execution_id: executionId,
@@ -95,6 +95,11 @@ export function buildExecutionRecordForAskAgentCommand(
         session_id: header.sessionId,
         trace_id: header.traceId,
         source_agent_type: source,
+        // Recorded so that when this sub-task's own execution later suspends and
+        // resumes, the worker can rebuild who to reply to (source_agent_type)
+        // and which group the reply belongs to — the resume message itself
+        // describes the hop that woke it, not this dispatch.
+        task_group_id: header.taskGroupId || '',
         stream_name: streamName,
         worker_id: '',
         target_agent_type: header.targetAgentType,

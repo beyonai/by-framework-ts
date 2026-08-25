@@ -22,6 +22,7 @@ export * from './processor';
 export * from './constants';
 export * from './availability';
 export * from './dispatch';
+export * from './liveness';
 export * from './factory';
 export * from './emitter';
 export * from './history';
