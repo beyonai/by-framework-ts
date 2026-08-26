@@ -245,6 +245,37 @@ export class GatewayClient {
     /**
      * Build a gateway command from parameters.
      */
+    /**
+     * Find the suspended execution a RESUME is meant to continue.
+     *
+     * Returns null when there is nothing to reattach to, which puts the caller
+     * back on "mint a fresh execution_id and initialize it" — today's behaviour
+     * for a genuinely new resume-shaped message.
+     *
+     * Guarded on the method existing, like Python's `hasattr` check: registry
+     * doubles and older implementations without `getExecutionByMessageId` must
+     * fall through rather than throw. Fail-soft for the same reason — a lookup
+     * error must not take down a dispatch, it only costs the reattachment.
+     */
+    private async lookupResumedExecution(
+        messageId: string,
+        sessionId: string
+    ): Promise<Record<string, any> | null> {
+        const registry = this.registry as { getExecutionByMessageId?: unknown } | undefined;
+        if (!registry || typeof registry.getExecutionByMessageId !== 'function') {
+            return null;
+        }
+        try {
+            return await (this.registry as any).getExecutionByMessageId(messageId, sessionId);
+        } catch (error) {
+            console.warn(
+                `[GatewayClient] Could not look up the execution a RESUME continues `
+                + `(message_id=${messageId}, session_id=${sessionId}): ${error}`
+            );
+            return null;
+        }
+    }
+
     private buildGatewayCommand(
         actionType: ActionType | string,
         header: MessageHeader,
@@ -286,20 +317,33 @@ export class GatewayClient {
                     executionSourceAgentFallback: 'client',
                 });
             } else {
-                await initializeQueuedExecution(this.registry, {
-                    execution_id: `exec-${uuidv4().slice(0, 8)}`,
-                    message_id: command.header.messageId,
-                    session_id: command.header.sessionId,
-                    trace_id: command.header.traceId,
-                    parent_message_id: command.header.parentMessageId || '',
-                    source_agent_type: command.header.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE,
-                    target_agent_type: command.header.targetAgentType,
-                    stream_name: resolvedStreamName,
-                    worker_id: '',
-                    status: 'QUEUED',
-                    cancel_requested: false,
-                    cancel_reason: '',
-                }).catch(() => undefined);
+                // Same reattachment rule as sendMessage: a ResumeCommand lands
+                // on this branch, and initializing here would rewrite
+                // msg_map:<messageId> to a brand-new record — detaching the
+                // resume from the suspended execution it continues, and taking
+                // that execution's source_agent_type and metadata with it.
+                const resumedExecution = command instanceof ResumeCommand
+                    ? await this.lookupResumedExecution(
+                        command.header.messageId,
+                        command.header.sessionId
+                    )
+                    : null;
+                if (!resumedExecution) {
+                    await initializeQueuedExecution(this.registry, {
+                        execution_id: `exec-${uuidv4().slice(0, 8)}`,
+                        message_id: command.header.messageId,
+                        session_id: command.header.sessionId,
+                        trace_id: command.header.traceId,
+                        parent_message_id: command.header.parentMessageId || '',
+                        source_agent_type: command.header.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE,
+                        target_agent_type: command.header.targetAgentType,
+                        stream_name: resolvedStreamName,
+                        worker_id: '',
+                        status: 'QUEUED',
+                        cancel_requested: false,
+                        cancel_reason: '',
+                    }).catch(() => undefined);
+                }
                 await this.redis.xadd(resolvedStreamName, '*', 'data', JSON.stringify(command.toDict()));
             }
         } else {
@@ -664,7 +708,21 @@ export class GatewayClient {
         );
 
         const routePolicy = params.routePolicy ?? (requireOnline ? RoutePolicy.FAIL_FAST : RoutePolicy.SEND_ANYWAY);
-        const executionId = `exec-${uuidv4().slice(0, 8)}`;
+
+        // A RESUME reuses the message_id of the original AskAgentCommand so the
+        // worker can look the suspended execution back up. Reuse its
+        // execution_id too, and skip re-initializing the registry record for it
+        // below — initializeExecution() rewrites `msg_map:<messageId>` to point
+        // at the new record, which detaches this resume from the execution it is
+        // meant to continue. The detached record carries neither
+        // source_agent_type nor metadata, so the callee then fails to reply to
+        // its caller at all AND loses the caller's dispatch metadata.
+        // Mirrors Python client.py (fix 90764e1, closes #75/#76/#77).
+        const resumedExecution =
+            (requestParams.actionType || ActionType.ASK_AGENT) === ActionType.RESUME
+                ? await this.lookupResumedExecution(messageId, requestParams.sessionId)
+                : null;
+        const executionId = String(resumedExecution?.execution_id || `exec-${uuidv4().slice(0, 8)}`);
         let routeStatus = params.targetWorkerId ? 'DIRECT_WORKER' : AvailabilityStatus.DELIVER_NOW;
         if (!params.targetWorkerId) {
             const availability = await new AvailabilityRouter(this.redis, this.registry).prepareDelivery({
@@ -701,7 +759,10 @@ export class GatewayClient {
 
         const dispatchStartedAt = Date.now();
         if (routeStatus === AvailabilityStatus.QUEUE_PENDING) {
-            await initializeQueuedExecution(this.registry, {
+            // Skipped for a RESUME that reattached: that execution is already
+            // tracked, and re-initializing here would overwrite its
+            // message_id -> execution_id mapping. See lookupResumedExecution.
+            if (!resumedExecution) await initializeQueuedExecution(this.registry, {
                 execution_id: executionId,
                 message_id: messageId,
                 session_id: requestParams.sessionId,
@@ -718,7 +779,7 @@ export class GatewayClient {
                 route_status: routeStatus,
             }).catch(() => undefined);
         } else if (command instanceof AskAgentCommand) {
-            await initializeQueuedExecution(this.registry, {
+            if (!resumedExecution) await initializeQueuedExecution(this.registry, {
                 execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
                 trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
                 source_agent_type: params.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE, target_agent_type: requestParams.targetAgentType,
@@ -727,7 +788,10 @@ export class GatewayClient {
             }).catch(() => undefined);
             await this.redis.xadd(route.streamName, '*', 'data', JSON.stringify(command.toDict()));
         } else {
-            await initializeQueuedExecution(this.registry, {
+            // The RESUME path lands here (buildGatewayCommand returns a
+            // ResumeCommand, not an AskAgentCommand), which is exactly why the
+            // guard matters most on this branch.
+            if (!resumedExecution) await initializeQueuedExecution(this.registry, {
                 execution_id: executionId, message_id: messageId, session_id: requestParams.sessionId,
                 trace_id: traceId, parent_message_id: requestParams.parentMessageId || '',
                 source_agent_type: params.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE, target_agent_type: requestParams.targetAgentType,
