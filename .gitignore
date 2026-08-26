@@ -5,3 +5,8 @@ yarn.lock
 .npmrc
 .DS_Store
 .claude/settings.local.json
+# AOCI index files (local only)
+aoci.txt
+aoci.meta.txt
+aoci.code.txt
+.aoci/
