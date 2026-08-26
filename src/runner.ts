@@ -557,11 +557,29 @@ export class WorkerRunner {
 
             // Update or create RUNNING execution so worker_id is available for cancel routing.
             if (existingExecution && registry?.updateExecutionStatus) {
-                await registry.updateExecutionStatus(executionId, data.header.sessionId, 'RUNNING', {
+                const statusFields: Record<string, unknown> = {
                     worker_id: this.worker.workerId,
                     stream_name: streamName,
                     redis_message_id: msgId,
-                });
+                };
+                if (!(data instanceof ResumeCommand)) {
+                    // The dispatch metadata, recorded by whoever is EXECUTING the
+                    // message rather than by whoever sent it: header.metadata IS
+                    // the dispatch metadata by definition, so this is correct for
+                    // every dispatcher — including a client root dispatch and a
+                    // Python/Java caller, none of which writes the field.
+                    // (context.ts's initializeExecution does, and is kept: it is
+                    // the only record that exists before a callee is ever picked
+                    // up, which is what the wait sweep reads.) handleMessage
+                    // reads it back to restore what this execution was originally
+                    // asked for once it resumes.
+                    //
+                    // A ResumeCommand must NOT write it: the waking message's
+                    // metadata would overwrite the very original this exists to
+                    // preserve, and nothing else keeps a copy.
+                    statusFields.metadata = { ...(data.header.metadata || {}) };
+                }
+                await registry.updateExecutionStatus(executionId, data.header.sessionId, 'RUNNING', statusFields);
             } else if (registry?.saveExecution) {
                 const nowMs = Date.now();
                 await registry.saveExecution({
@@ -571,6 +589,11 @@ export class WorkerRunner {
                     session_id: data.header.sessionId,
                     worker_id: this.worker.workerId,
                     target_agent_type: data.header.targetAgentType,
+                    // Same reason as the update branch above. This is the
+                    // no-existing-record fallback, so there is no stored original
+                    // to protect and no ResumeCommand guard to make: whatever woke
+                    // this is all this execution has ever been told.
+                    metadata: { ...(data.header.metadata || {}) },
                     stream_name: streamName,
                     redis_message_id: msgId,
                     status: 'RUNNING',

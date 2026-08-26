@@ -18,6 +18,7 @@ import {
     singleCallTaskGroupId,
 } from './constants';
 import { flushPendingGroupReplies } from './liveness/wait_reply';
+import { mergeResumeMetadata } from './resume_metadata';
 import { WorkerRegistry } from './registry';
 import { WorkerHeartbeat } from './heartbeat';
 import { MessageHeader } from './protocol/message_header';
@@ -139,13 +140,20 @@ export abstract class GatewayWorker {
         options: HandleMessageOptions = {}
     ): Promise<AgentTaskResult> {
         const traceId = command.header.traceId || uuidv4().replace(/-/g, '');
+        // The command the caller is owed a reply against stays the RAW one:
+        // resolveReplyCommand below reads it, and the outbound direction must
+        // not inherit the inbound merge. Everything the business side touches
+        // — the context's currentCommand and the argument handed to
+        // processCommand — uses the restored one instead.
+        const rawCommand = command;
+        const inboundCommand = GatewayWorker.restoreInboundMetadata(command, options.execution);
         const context = new AgentContext(
-            command.header.sessionId,
+            inboundCommand.header.sessionId,
             traceId,
             this.redis,
-            command.header.targetAgentType,
-            command.header.messageId,
-            command,
+            inboundCommand.header.targetAgentType,
+            inboundCommand.header.messageId,
+            inboundCommand,
             options.cancelSignal,
             options.cancelReason || '',
             this.pluginRegistry,
@@ -164,7 +172,7 @@ export abstract class GatewayWorker {
         // resolveReplyCommand rebuilds the ORIGINAL dispatch header from the
         // execution snapshot instead; the whole reply — routing included — must
         // be driven off that command, not off `command`.
-        const replyCommand = GatewayWorker.resolveReplyCommand(command, options.execution);
+        const replyCommand = GatewayWorker.resolveReplyCommand(rawCommand, options.execution);
         const hasSourceAgent = replyCommand !== null;
 
         // Determine parent message id - restore from execution if resumed
@@ -274,7 +282,13 @@ export abstract class GatewayWorker {
                 await context.emitState({ state: AgentState.RESUMED });
             }
 
-            const result = await this.processCommand(command, context);
+            // inboundCommand, not command: the handler reads what this
+            // execution was originally dispatched with, merged under the waking
+            // message's own metadata. Everything above this line — the Task
+            // Group join's resultData in particular — deliberately stays on the
+            // raw command, matching Python, where the join reads `header` off
+            // `raw_command` rather than the restored one.
+            const result = await this.processCommand(inboundCommand, context);
             // Stand-ins for Task Group members that never reached a worker go
             // out only once the handler has returned normally, and never when it
             // threw. Sent from inside dispatchGroup instead, they would land on
@@ -482,6 +496,59 @@ export abstract class GatewayWorker {
                 userName: header.userName,
                 // Replacement, not a merge with header.metadata — see above.
                 metadata: { ...(snapshot.metadata || {}) },
+                traceParentSpanId: header.traceParentSpanId,
+                langfuseParentObservationId: header.langfuseParentObservationId,
+            }),
+            command.content,
+            command.status,
+            command.replyData,
+            command.extraPayload
+        );
+    }
+
+    /**
+     * Give a resumed handler its own dispatch metadata back.
+     *
+     * The mirror image of resolveReplyCommand, and deliberately not the same
+     * rule. That one rebuilds the header this execution *sends*; this one
+     * rebuilds the header it *reads*. A resumed handler otherwise sees only the
+     * metadata of whatever woke it up — an askUser answer's, or a sub-call's
+     * reply — and everything the execution was originally dispatched with is
+     * gone from the moment it first suspends.
+     *
+     * Merged, not replaced (the opposite of the outbound direction): this agent
+     * IS the addressee of the waking message, so its metadata is real payload
+     * here rather than someone else's plumbing. Original dispatch metadata is
+     * the base, the waking message wins collisions. See resume_metadata.ts for
+     * why the framework's per-hop trace keys are excluded from the base.
+     *
+     * Returns a NEW command — never mutates. The caller keeps the raw one for
+     * resolveReplyCommand, so mutating here would leak the inbound merge into
+     * the reply that goes out.
+     *
+     * Mirrors Python worker.py's _restore_inbound_metadata.
+     */
+    private static restoreInboundMetadata(
+        command: GatewayCommand,
+        execution?: HandleMessageOptions['execution']
+    ): GatewayCommand {
+        if (!(command instanceof ResumeCommand)) {
+            return command;
+        }
+        const header = command.header;
+        const snapshot = execution?.existingData || {};
+        return new ResumeCommand(
+            new MessageHeader(header.messageId, header.sessionId, header.traceId, {
+                sourceAgentType: header.sourceAgentType,
+                targetAgentType: header.targetAgentType,
+                parentMessageId: header.parentMessageId,
+                taskGroupId: header.taskGroupId,
+                userCode: header.userCode,
+                userName: header.userName,
+                metadata: mergeResumeMetadata(
+                    snapshot.metadata as Record<string, unknown> | undefined,
+                    header.metadata
+                ),
                 traceParentSpanId: header.traceParentSpanId,
                 langfuseParentObservationId: header.langfuseParentObservationId,
             }),

@@ -7,6 +7,7 @@ import { AgentContext } from './context';
 import { CLIENT_SOURCE_AGENT_TYPE, QueueNames } from './constants';
 import { consumeWaitEntry, emitOrphanedReply } from './liveness/wait_gate';
 import { flushPendingGroupReplies } from './liveness/wait_reply';
+import { mergeResumeMetadata } from './resume_metadata';
 import { getRedis } from './redis_client';
 import { MessageHeader } from './protocol/message_header';
 import { WorkerRegistry } from './registry';
@@ -60,14 +61,22 @@ export class GatewayProcessor {
             }
         }
 
-        // Same rule as GatewayWorker.resolveReplyCommand, and for the same
-        // reason: this is a second, independent entry point for replies (callers
-        // that drive their own consume loop instead of subclassing
-        // GatewayWorker). `!!sourceAgentType && !isAgentReturn` denied every
-        // resumed execution a reply here too.
-        const replyHeader = await this.resolveReplyHeader(command);
+        // Same rules as GatewayWorker, and for the same reason: this is a
+        // second, independent entry point for replies (callers that drive their
+        // own consume loop instead of subclassing GatewayWorker).
+        // `!!sourceAgentType && !isAgentReturn` denied every resumed execution a
+        // reply here too. One read of the execution record feeds both
+        // directions — the header this execution replies with, and the header
+        // its own handler reads — which are different rules over the same data.
+        const snapshot = isAgentReturn ? await this.loadExecutionSnapshot(command) : null;
+        const rawCommand = command;
+        const replyHeader = this.resolveReplyHeader(command, snapshot);
         const hasSourceAgent = replyHeader !== null;
         const sourceAgentType = replyHeader?.sourceAgentType ?? '';
+        // Runs regardless of hasSourceAgent: a client-dispatched root is owed
+        // no reply but still has its own metadata to get back, which is exactly
+        // the case that motivated this.
+        const inboundCommand = GatewayProcessor.restoreInboundMetadata(command, snapshot);
 
         const context = new AgentContext(
             command.header.sessionId,
@@ -84,7 +93,7 @@ export class GatewayProcessor {
                 await context.emitState({ state: AgentState.RESUMED });
             }
 
-            const result = await handler(command, context);
+            const result = await handler(inboundCommand, context);
             // Same rule as GatewayWorker.handleMessage: stand-ins for Task Group
             // members that never reached a worker go out only once the handler
             // has returned normally, and never when it threw.
@@ -99,7 +108,9 @@ export class GatewayProcessor {
             // resumed to reply later, so it must reply now.
             const isSuspended = context.isSuspended() && !isTerminalState(taskResult.status);
             if (hasSourceAgent && !isSuspended) {
-                await this.enqueueCallback(command, taskResult.status, taskResult.replyData, {
+                // rawCommand, not the inbound-restored one: the reply is the
+                // outbound direction and must not inherit the inbound merge.
+                await this.enqueueCallback(rawCommand, taskResult.status, taskResult.replyData, {
                     content: taskResult.content,
                     metadata: taskResult.metadata,
                     extraPayload: taskResult.extraPayload,
@@ -138,7 +149,7 @@ export class GatewayProcessor {
             if (hasSourceAgent) {
                 // Sent regardless of suspension: the execution died, so no later
                 // resume will produce the reply the caller awaits.
-                await this.enqueueCallback(command, 'FAILED', { error: String(error) }, {
+                await this.enqueueCallback(rawCommand, 'FAILED', { error: String(error) }, {
                     replyHeader: replyHeader!,
                 });
             }
@@ -167,30 +178,26 @@ export class GatewayProcessor {
      * written before it existed) degrades to an empty object rather than leaking
      * the waking message's metadata to the caller.
      *
-     * Unlike the worker path this is async: a GatewayProcessor has no runner
-     * feeding it an execution snapshot, so it queries the registry itself.
-     * Mirrors Python processor.py's _resolve_reply_header.
+     * This is the OUTBOUND direction only. What the handler itself reads is
+     * restoreInboundMetadata, which merges rather than replaces — and which
+     * must run even when this returns null, since a client-dispatched root has
+     * no caller but still has its own metadata to get back.
+     *
+     * Unlike the worker path the record is queried here rather than handed in:
+     * a GatewayProcessor has no runner feeding it an execution snapshot. The
+     * query itself lives in loadExecutionSnapshot so one read feeds both
+     * directions. Mirrors Python processor.py's _resolve_reply_header.
      */
-    private async resolveReplyHeader(command: GatewayCommand): Promise<MessageHeader | null> {
+    private resolveReplyHeader(
+        command: GatewayCommand,
+        snapshot: Record<string, any> | null
+    ): MessageHeader | null {
         const header = command.header;
         if (!(command instanceof ResumeCommand)) {
             return header.sourceAgentType ? header : null;
         }
 
-        let execution: Record<string, any> | null = null;
-        try {
-            execution = await new WorkerRegistry(this.redis).getExecutionByMessageId(
-                header.messageId,
-                header.sessionId
-            );
-        } catch (error) {
-            console.warn(
-                `[${this.workerId}] Could not resolve the caller of resumed execution `
-                + `${header.messageId}: ${error}`
-            );
-            return null;
-        }
-
+        const execution = snapshot;
         const callerAgentType = String(execution?.source_agent_type || '');
         if (!callerAgentType || callerAgentType === CLIENT_SOURCE_AGENT_TYPE) {
             return null;
@@ -207,6 +214,65 @@ export class GatewayProcessor {
             traceParentSpanId: header.traceParentSpanId,
             langfuseParentObservationId: header.langfuseParentObservationId,
         });
+    }
+
+    /**
+     * Read the execution record the original dispatch wrote.
+     *
+     * Fetched once per resume and shared by both restore directions. Fail-soft:
+     * a registry error degrades to "no record", which each caller then handles
+     * as its own no-op. Mirrors Python processor.py's _load_execution_snapshot.
+     */
+    private async loadExecutionSnapshot(
+        command: GatewayCommand
+    ): Promise<Record<string, any> | null> {
+        const header = command.header;
+        try {
+            return await new WorkerRegistry(this.redis).getExecutionByMessageId(
+                header.messageId,
+                header.sessionId
+            );
+        } catch (error) {
+            console.warn(
+                `[${this.workerId}] Could not load the execution record of resumed `
+                + `execution ${header.messageId}: ${error}`
+            );
+            return null;
+        }
+    }
+
+    /**
+     * Give a resumed handler its own dispatch metadata back.
+     *
+     * Mirrors GatewayWorker.restoreInboundMetadata, including its
+     * merge-don't-replace rule and its no-mutation rule; see that method for
+     * why the inbound direction differs from the outbound one.
+     */
+    private static restoreInboundMetadata(
+        command: GatewayCommand,
+        snapshot: Record<string, any> | null
+    ): GatewayCommand {
+        if (!(command instanceof ResumeCommand)) {
+            return command;
+        }
+        const header = command.header;
+        return new ResumeCommand(
+            new MessageHeader(header.messageId, header.sessionId, header.traceId, {
+                sourceAgentType: header.sourceAgentType,
+                targetAgentType: header.targetAgentType,
+                parentMessageId: header.parentMessageId,
+                taskGroupId: header.taskGroupId,
+                userCode: header.userCode,
+                userName: header.userName,
+                metadata: mergeResumeMetadata(snapshot?.metadata, header.metadata),
+                traceParentSpanId: header.traceParentSpanId,
+                langfuseParentObservationId: header.langfuseParentObservationId,
+            }),
+            command.content,
+            command.status,
+            command.replyData,
+            command.extraPayload
+        );
     }
 
     private async enqueueCallback(
