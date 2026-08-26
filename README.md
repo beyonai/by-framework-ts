@@ -399,6 +399,28 @@ The base class automatically handles:
 - Emitting `FINAL_ANSWER` and `APP_STREAM_RESPONSE` upon completion.
 - Wrapping results in a `ResumeCommand` for upstream agents if `sourceAgentType` exists.
 
+#### `header.metadata` across a suspend
+
+An agent that suspends — `askUser`, or `callAgent` with `waitForReply` — ends
+its execution and is revived later by a `ResumeCommand`. Metadata is restored in
+two directions, and the rules are deliberately different:
+
+- **What your handler reads** (`command.header.metadata` on the resumed call):
+  the metadata this execution was **originally dispatched with**, merged under
+  the waking message's own metadata. Same-named keys go to the waking message,
+  since it is the newer, more specific hop. Without the restore, everything you
+  were dispatched with would vanish the first time you suspended — you would
+  come back seeing only the `askUser` answer's metadata, or a sub-call's reply
+  metadata.
+- **What your caller receives**: the metadata **it** dispatched you with, as a
+  full replacement, plus anything you return in `metadata` layered on top. The
+  message that woke you is plumbing for that one hop and never reaches your
+  caller, even though you can see it yourself.
+
+Three framework-injected keys — `trace_parent_span_id`,
+`framework_parent_span_id`, `langfuse_parent_observation_id` — always describe
+the current hop and are never restored from the record.
+
 ### AgentContext
 
 | Method | Description |
