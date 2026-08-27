@@ -1,11 +1,15 @@
 import { GatewayProcessor } from '../src/processor';
-import { AskAgentCommand, ResumeCommand, commandFromDict } from '../src/protocol/commands';
+import { AgentContext } from '../src/context';
+import { WorkerRegistry } from '../src/registry';
+import { AskAgentCommand, GatewayCommand, ResumeCommand, commandFromDict } from '../src/protocol/commands';
 import { MessageHeader } from '../src/protocol/message_header';
 import { ActionType } from '../src/protocol/action_type';
 import { AgentState } from '../src/protocol/agent_state';
 import { AgentTaskResult } from '../src/protocol/results';
+import { CLIENT_SOURCE_AGENT_TYPE, QueueNames } from '../src/constants';
+import { MockRedis, bringAgentTypeOnline } from './helpers/mock_redis';
 
-class MockRedis {
+class StreamCaptureRedis {
     calls: Array<{ name: string; payload: string }> = [];
 
     async xadd(name: string, _id: string, field: string, payload: string): Promise<string> {
@@ -36,7 +40,7 @@ class MockRedis {
  */
 describe('GatewayProcessor', () => {
     test('enqueue callback emits ResumeCommand to source agent stream', async () => {
-        const redis = new MockRedis();
+        const redis = new StreamCaptureRedis();
         const processor = new GatewayProcessor('worker-1', redis as any);
 
         const command = new AskAgentCommand(
@@ -76,7 +80,7 @@ describe('GatewayProcessor', () => {
     });
 
     test('process injects decoded command into context', async () => {
-        const redis = new MockRedis();
+        const redis = new StreamCaptureRedis();
         const processor = new GatewayProcessor('worker-1', redis as any);
 
         const command = new AskAgentCommand(
@@ -97,7 +101,7 @@ describe('GatewayProcessor', () => {
     });
 
     test('on failure enqueues FAILED callback to source agent', async () => {
-        const redis = new MockRedis();
+        const redis = new StreamCaptureRedis();
         const processor = new GatewayProcessor('worker-1', redis as any);
 
         const command = new AskAgentCommand(
@@ -122,7 +126,7 @@ describe('GatewayProcessor', () => {
     });
 
     test('emits COMPLETED state when no source agent', async () => {
-        const redis = new MockRedis();
+        const redis = new StreamCaptureRedis();
         const processor = new GatewayProcessor('worker-1', redis as any);
 
         const command = new AskAgentCommand(
@@ -142,7 +146,7 @@ describe('GatewayProcessor', () => {
     });
 
     test('emits RESUMED state for ResumeCommand', async () => {
-        const redis = new MockRedis();
+        const redis = new StreamCaptureRedis();
         const processor = new GatewayProcessor('worker-1', redis as any);
 
         const command = new ResumeCommand(
@@ -162,5 +166,156 @@ describe('GatewayProcessor', () => {
             (p: any) => p.data?.choices?.[0]?.delta?.content?.includes(AgentState.RESUMED)
         );
         expect(resumedState).toBeTruthy();
+    });
+});
+
+/**
+ * GatewayProcessor is the SECOND reply path (callers that drive their own
+ * consume loop instead of subclassing GatewayWorker), and resolveReplyHeader is
+ * its copy of GatewayWorker.resolveReplyCommand. The worker copy restores the
+ * caller's dispatch metadata from the execution record; this one restored only
+ * the three routing fields and left `metadata` as whatever woke the execution
+ * up — the exact bug the worker path was fixed for, on the door nobody looked
+ * at. Mirrors Python tests/worker/test_processor.py's
+ * test_processor_resumed_reply_* pair.
+ *
+ * Every test here reaches the reply THROUGH A SUSPENSION on purpose: the
+ * never-suspended path builds its reply header straight from the incoming
+ * command, where the metadata was always right, so a test that skips the
+ * suspension proves nothing.
+ */
+describe('a resumed execution on the processor path replies with the caller\'s metadata', () => {
+    const SESSION = 'sess-proc-meta';
+
+    /**
+     * A (an AgentContext) dispatches to B with its own metadata; B runs on a
+     * GatewayProcessor, calls askUser and unwinds; the human answers with
+     * competing metadata; B resumes and replies to A.
+     */
+    async function suspendOnAskUser(): Promise<{
+        redis: MockRedis;
+        processor: GatewayProcessor;
+        dispatched: AskAgentCommand;
+        repliesToA: () => ResumeCommand[];
+    }> {
+        const redis = new MockRedis();
+        await bringAgentTypeOnline(redis, 'agent-b');
+        const processor = new GatewayProcessor('worker-proc', redis as any);
+
+        // A's dispatch: this is what persists A's metadata on B's execution
+        // record, which is the only durable record of what it was.
+        const callerContext = new AgentContext(
+            SESSION, 'trace-proc', redis as any, 'agent-a', 'msg-a'
+        );
+        await callerContext.callAgent({
+            targetAgentType: 'agent-b',
+            content: 'delegate',
+            metadata: { caller: 'agent-a', tag: 'keep' },
+        });
+
+        const dispatched = commandFromDict(
+            redis.getStreamPayloads(QueueNames.ctrl_stream('agent-b'))[0]
+        ) as AskAgentCommand;
+
+        // B suspends on askUser and unwinds without a result.
+        await processor.process(dispatched, async (command: GatewayCommand, context: AgentContext) => {
+            await context.askUser('which colour?');
+            return { status: AgentState.QUEUED };
+        });
+
+        const repliesToA = () => redis
+            .getStreamPayloads(QueueNames.ctrl_stream('agent-a'))
+            .map((p) => commandFromDict(p) as ResumeCommand);
+        return { redis, processor, dispatched, repliesToA };
+    }
+
+    /** What the client sends when the person answers; its metadata is this
+     *  hop's plumbing and belongs to nobody downstream. */
+    function theHumanAnswers(messageId: string): ResumeCommand {
+        return new ResumeCommand(
+            new MessageHeader(messageId, SESSION, 'trace-proc', {
+                targetAgentType: 'agent-b',
+                sourceAgentType: CLIENT_SOURCE_AGENT_TYPE,
+                metadata: { caller: 'should-not-leak', client_tag: 'should-not-leak' },
+            }),
+            'Pink',
+            AgentState.COMPLETED,
+            { answer: 'Pink' }
+        );
+    }
+
+    test('B suspended on askUser does not reply to A at all', async () => {
+        // Guards the two tests below from degrading into the never-suspended
+        // path, where the reply header was always correct.
+        const { repliesToA } = await suspendOnAskUser();
+        expect(repliesToA()).toEqual([]);
+    });
+
+    test('the reply carries A\'s metadata, not the answering client\'s', async () => {
+        const { processor, dispatched, repliesToA } = await suspendOnAskUser();
+
+        await processor.process(
+            theHumanAnswers(dispatched.header.messageId),
+            async () => new AgentTaskResult({
+                status: AgentState.COMPLETED,
+                replyData: { done: true },
+                // B's own contribution: overrides same-named keys from A's
+                // metadata, leaves the rest alone.
+                metadata: { caller: 'overridden', tokens: 123 },
+            })
+        );
+
+        const replies = repliesToA();
+        expect(replies).toHaveLength(1);
+        const [reply] = replies;
+        // Proves this went through the resume rebuild: the waking command's own
+        // parentMessageId is empty, so only the execution record can name A.
+        expect(reply.header.messageId).toBe('msg-a');
+        expect(reply.header.targetAgentType).toBe('agent-a');
+        expect(reply.header.parentMessageId).toBe(dispatched.header.messageId);
+
+        expect(reply.header.metadata.tag).toBe('keep');
+        expect(reply.header.metadata.caller).toBe('overridden');
+        expect(reply.header.metadata.tokens).toBe(123);
+        expect(reply.header.metadata).not.toHaveProperty('client_tag');
+    });
+
+    test('a record predating the field degrades to an empty object', async () => {
+        // Rolling upgrade: executions dispatched by the previous version carry
+        // no `metadata` on their record. Falling back to the waking command's
+        // metadata would be the original bug wearing a default value, so the
+        // assertion is on the WHOLE object, not on the absence of leaked keys.
+        const redis = new MockRedis();
+        const registry = new WorkerRegistry(redis as any);
+        const processor = new GatewayProcessor('worker-proc', redis as any);
+
+        // Exactly what the pre-fix dispatch pipeline wrote: routing fields, no
+        // `metadata` key at all.
+        await registry.initializeExecution({
+            execution_id: 'exec-legacy',
+            message_id: 'msg-b',
+            session_id: SESSION,
+            trace_id: 'trace-proc',
+            parent_message_id: 'msg-a',
+            source_agent_type: 'agent-a',
+            target_agent_type: 'agent-b',
+            task_group_id: '',
+            status: AgentState.WAITING_USER,
+        });
+
+        await processor.process(
+            theHumanAnswers('msg-b'),
+            async () => new AgentTaskResult({
+                status: AgentState.COMPLETED,
+                replyData: { done: true },
+            })
+        );
+
+        const replies = redis
+            .getStreamPayloads(QueueNames.ctrl_stream('agent-a'))
+            .map((p) => commandFromDict(p) as ResumeCommand);
+        expect(replies).toHaveLength(1);
+        expect(replies[0].header.messageId).toBe('msg-a');
+        expect(replies[0].header.metadata).toEqual({});
     });
 });

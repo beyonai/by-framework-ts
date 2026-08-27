@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { QueueNames } from '../constants';
+import { CLIENT_SOURCE_AGENT_TYPE, QueueNames } from '../constants';
 import { AskAgentCommand } from '../protocol/commands';
 import { MessageHeader } from '../protocol/message_header';
 import type { AskAgentQueueNames } from './ports';
@@ -86,7 +86,7 @@ export function buildExecutionRecordForAskAgentCommand(
     const header = command.header;
     const source =
         sourceAgentFallback === 'client'
-            ? (header.sourceAgentType || 'client')
+            ? (header.sourceAgentType || CLIENT_SOURCE_AGENT_TYPE)
             : header.sourceAgentType;
     return {
         execution_id: executionId,
@@ -95,6 +95,17 @@ export function buildExecutionRecordForAskAgentCommand(
         session_id: header.sessionId,
         trace_id: header.traceId,
         source_agent_type: source,
+        // Recorded so that when this sub-task's own execution later suspends and
+        // resumes, the worker can rebuild who to reply to (source_agent_type)
+        // and which group the reply belongs to — the resume message itself
+        // describes the hop that woke it, not this dispatch.
+        task_group_id: header.taskGroupId || '',
+        // The caller's original dispatch metadata, for the same reason and read
+        // back by the same code: this is the only durable record of what it was,
+        // so a resumed reply can restore it as the base layer instead of
+        // inheriting whatever message last woke this execution up (an askUser
+        // answer, or a sub-call's reply). See resolveReplyCommand.
+        metadata: { ...(header.metadata || {}) },
         stream_name: streamName,
         worker_id: '',
         target_agent_type: header.targetAgentType,

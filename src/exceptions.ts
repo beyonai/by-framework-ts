@@ -180,6 +180,32 @@ export class CommandValidationError extends GatewaySDKError {
   }
 }
 
+// === Suspended-Caller Liveness Exceptions ===
+
+/**
+ * A wait-index ZSET member could not be decoded (see src/liveness/wait_index.ts).
+ *
+ * The member encoding is a cross-SDK wire contract, so this is the shape a
+ * Python/TS/Java encoding drift surfaces as: the member on the wire does not
+ * round-trip through this SDK's decoder. `reason` therefore has to stay
+ * specific ("dangling escape" vs. a wrong field count) — it is the only
+ * evidence available for telling an encoder bug from a corrupted key.
+ *
+ * The wait sweeper catches this per entry and drops just that member, so one
+ * bad member cannot poison a whole shard.
+ */
+export class WaitIndexMemberError extends GatewaySDKError {
+  member: string;
+  reason: string;
+
+  constructor(member: string, reason: string) {
+    super(`Invalid wait-index member (${reason}): ${JSON.stringify(member)}`);
+    this.name = 'WaitIndexMemberError';
+    this.member = member;
+    this.reason = reason;
+  }
+}
+
 // === HTTP Related Exceptions ===
 
 export class HttpClientError extends GatewaySDKError {

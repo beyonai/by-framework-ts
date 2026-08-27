@@ -8,6 +8,8 @@ import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand,
 import { WorkerRegistry } from './registry';
 import { HistoryProvider } from './history';
 import { AgentState } from './protocol/agent_state';
+import { consumeWaitEntry, emitOrphanedReply } from './liveness/wait_gate';
+import { WaitIndexSweeper } from './liveness/wait_sweeper';
 import { SpanRecorder, TraceSpan } from './trace/span_recorder';
 
 interface RunningExecution {
@@ -19,6 +21,19 @@ interface RunningExecution {
     abortController: AbortController;
     cancelReason: string;
     context: any;
+    /**
+     * True when this execution has already been through a worker once, so its
+     * identity must be restored from the registry record rather than
+     * re-derived from the incoming message header.
+     * Mirrors Python worker/_execution_tracking.py RunningExecution.is_resumed.
+     */
+    isResumed: boolean;
+    /**
+     * The full execution record written at dispatch time (the snapshot the
+     * caller's own identity lives in), or null when no record resolved.
+     * Mirrors Python RunningExecution.existing_data.
+     */
+    existingData: Record<string, any> | null;
 }
 
 export class WorkerRunner {
@@ -56,6 +71,12 @@ export class WorkerRunner {
     // Round-robin cursor for poll()'s phase-two blocking read, so no
     // agent_type is permanently starved of the blocking slot.
     private primaryCursor: number = 0;
+    // Background pass over due wait-index entries. Hosted by every worker (no
+    // leader election — shards are claimed opportunistically), so the mechanism
+    // inherits the fleet's availability. Started in initialize(), stopped in
+    // release(); it decides for itself whether either of its two halves is
+    // switched on.
+    private waitSweeper: WaitIndexSweeper | null = null;
 
     readonly spanRecorder: SpanRecorder;
 
@@ -244,6 +265,7 @@ export class WorkerRunner {
             }
         );
         this.startControlLoop();
+        this.startWaitSweeper();
 
         console.log(`[${this.worker.workerId}] Worker environment ready.`);
     }
@@ -253,6 +275,13 @@ export class WorkerRunner {
      */
     async release(): Promise<void> {
         this.controlLoopRunning = false;
+        // Stopped before the Redis connections close, and awaited: an in-flight
+        // pass holds a shard lock, and dropping the connection under it would
+        // leave that lock held for its full TTL.
+        if (this.waitSweeper) {
+            await this.waitSweeper.stop().catch(() => undefined);
+            this.waitSweeper = null;
+        }
         await this.worker.stopHeartbeat();
         let releasedWorkerId = false;
         if (this.lockToken) {
@@ -385,6 +414,31 @@ export class WorkerRunner {
                 return;
             }
 
+            if (data instanceof ResumeCommand) {
+                // Idempotency gate. Must stay HERE: before the execution lookup
+                // below and before GatewayWorker's Task Group join (which
+                // HINCRBYs `completed`, so a duplicate would push it past
+                // `total` and aggregate a second time). Being upstream of the
+                // worker is what makes one gate cover both.
+                const gate = await consumeWaitEntry(this.redis, data);
+                if (!gate.allow) {
+                    console.warn(
+                        `[${this.worker.workerId}] Dropping reply for an already-resolved wait `
+                        + `(${gate.reason}): message_id=${data.header.messageId}, `
+                        + `child_message_id=${data.header.parentMessageId}, `
+                        + `task_group_id=${data.header.taskGroupId}, session_id=${data.header.sessionId}`
+                    );
+                    // Reporting only, after the decision: emitOrphanedReply is
+                    // fail-soft and must never change or block the drop.
+                    await emitOrphanedReply(this.redis, data, {
+                        workerId: this.worker.workerId,
+                        reason: gate.reason,
+                    });
+                    await this.redis.xack(streamName, this.groupName, msgId);
+                    return;
+                }
+            }
+
             // 注入会话历史消息（对标 Python SDK 的 HistoryProvider 注入逻辑）
             const history = await HistoryProvider.getSessionHistory(data.header.sessionId);
             if (data instanceof AskAgentCommand || data instanceof ResumeCommand) {
@@ -399,8 +453,39 @@ export class WorkerRunner {
                 ? await registry.getExecutionByMessageId(data.header.messageId, data.header.sessionId)
                 : null;
 
-            if (existingExecution && this.terminalExecutionStates.has(String(existingExecution.status || ''))) {
+            if (data instanceof ResumeCommand && !existingExecution) {
+                // The only diagnostic for this defect class. A ResumeCommand
+                // that resolves to nothing does not fail loudly — it silently
+                // opens a brand-new execution disconnected from the suspended
+                // one it was meant to continue, and the caller never wakes.
+                // Mirrors the warning in Python worker/runner.py.
+                console.warn(
+                    `[${this.worker.workerId}] ResumeCommand did not resolve to an existing execution `
+                    + `(message_id=${data.header.messageId}, session_id=${data.header.sessionId}); `
+                    + `starting a new, disconnected execution instead of continuing the suspended one.`
+                );
+            }
+
+            // Skip terminal state replays.
+            //
+            // A ResumeCommand is the exception: the execution it reattaches to
+            // legitimately sits in a terminal state, because a caller suspended
+            // on call_agent/ask_user *ends* its execution and is recreated by
+            // the reply. Skipping it here drops the reply entirely — which is
+            // exactly the regression that pairs with "the agent return inherits
+            // the caller's message_id" (see spec execution-model.md: fixing
+            // either one alone is a regression).
+            // Mirrors Python worker/runner.py: `and not isinstance(command, ResumeCommand)`.
+            if (
+                existingExecution
+                && this.terminalExecutionStates.has(String(existingExecution.status || ''))
+                && !(data instanceof ResumeCommand)
+            ) {
                 await this.redis.xack(streamName, this.groupName, msgId);
+                console.log(
+                    `[${this.worker.workerId}] Skipping terminal execution replay: `
+                    + `${data.header.messageId} -> ${existingExecution.status}`
+                );
                 return;
             }
 
@@ -420,7 +505,22 @@ export class WorkerRunner {
 
             // If this message was cancelled before any worker claimed it,
             // finalize immediately without entering business processing.
-            if (existingExecution?.cancel_requested && String(existingExecution.status || '') !== 'RUNNING') {
+            //
+            // "Never claimed" is QUEUED (or a record with no status at all):
+            // initializeExecution() writes it and nothing else does. The test
+            // used to be `!== 'RUNNING'`, which silently swept in every other
+            // non-RUNNING status — including WAITING_AGENT / WAITING_USER, so a
+            // suspended caller with a pending cancel would be finalized here
+            // without its worker ever running, meaning it never replies CANCELLED
+            // to *its own* caller and that one stays suspended in turn.
+            // Python's runner makes no status comparison at all: it just sets the
+            // cancel event and lets the worker's pre-processing check unwind,
+            // which is exactly what falling through to abortController does here.
+            const existingStatus = String(existingExecution?.status || '');
+            if (
+                existingExecution?.cancel_requested
+                && (!existingStatus || existingStatus === AgentState.QUEUED)
+            ) {
                 if (registry?.markExecutionFinished) {
                     await registry.markExecutionFinished(executionId, data.header.sessionId, AgentState.CANCELLED);
                 }
@@ -428,7 +528,19 @@ export class WorkerRunner {
                 return;
             }
 
-            this.activeExecutions.set(executionId, {
+            // QUEUED is the only status an execution can carry while it is
+            // still waiting to be picked up for the FIRST time: the dispatcher
+            // writes it in initializeExecution() and nothing else does.
+            // Anything else — RUNNING, WAITING_AGENT, WAITING_USER, a terminal
+            // state — means this execution has already been through a worker,
+            // so its identity must be restored from the record rather than
+            // re-derived from the message header.
+            // Mirrors Python worker/runner.py's is_resumed_execution.
+            const isResumedExecution = data instanceof ResumeCommand || Boolean(
+                existingExecution && existingStatus !== AgentState.QUEUED
+            );
+
+            const runningExecution: RunningExecution = {
                 executionId,
                 messageId: data.header.messageId,
                 parentMessageId,
@@ -437,16 +549,37 @@ export class WorkerRunner {
                 abortController,
                 cancelReason,
                 context: null,
-            });
+                isResumed: isResumedExecution,
+                existingData: existingExecution ?? null,
+            };
+            this.activeExecutions.set(executionId, runningExecution);
             this.messageToExecution.set(data.header.messageId, executionId);
 
             // Update or create RUNNING execution so worker_id is available for cancel routing.
             if (existingExecution && registry?.updateExecutionStatus) {
-                await registry.updateExecutionStatus(executionId, data.header.sessionId, 'RUNNING', {
+                const statusFields: Record<string, unknown> = {
                     worker_id: this.worker.workerId,
                     stream_name: streamName,
                     redis_message_id: msgId,
-                });
+                };
+                if (!(data instanceof ResumeCommand)) {
+                    // The dispatch metadata, recorded by whoever is EXECUTING the
+                    // message rather than by whoever sent it: header.metadata IS
+                    // the dispatch metadata by definition, so this is correct for
+                    // every dispatcher — including a client root dispatch and a
+                    // Python/Java caller, none of which writes the field.
+                    // (context.ts's initializeExecution does, and is kept: it is
+                    // the only record that exists before a callee is ever picked
+                    // up, which is what the wait sweep reads.) handleMessage
+                    // reads it back to restore what this execution was originally
+                    // asked for once it resumes.
+                    //
+                    // A ResumeCommand must NOT write it: the waking message's
+                    // metadata would overwrite the very original this exists to
+                    // preserve, and nothing else keeps a copy.
+                    statusFields.metadata = { ...(data.header.metadata || {}) };
+                }
+                await registry.updateExecutionStatus(executionId, data.header.sessionId, 'RUNNING', statusFields);
             } else if (registry?.saveExecution) {
                 const nowMs = Date.now();
                 await registry.saveExecution({
@@ -456,6 +589,11 @@ export class WorkerRunner {
                     session_id: data.header.sessionId,
                     worker_id: this.worker.workerId,
                     target_agent_type: data.header.targetAgentType,
+                    // Same reason as the update branch above. This is the
+                    // no-existing-record fallback, so there is no stored original
+                    // to protect and no ResumeCommand guard to make: whatever woke
+                    // this is all this execution has ever been told.
+                    metadata: { ...(data.header.metadata || {}) },
                     stream_name: streamName,
                     redis_message_id: msgId,
                     status: 'RUNNING',
@@ -475,6 +613,16 @@ export class WorkerRunner {
             const taskResult = await this.worker.handleMessage(data, {
                 cancelSignal: abortController.signal,
                 cancelReason,
+                // The dispatch-time snapshot is the only place a resumed
+                // execution's own caller survives — the reply header describes
+                // the hop that just finished, not the hop that called us.
+                // Mirrors Python runner.py passing
+                // `execution=self._tracker.get_execution(execution_id)`.
+                execution: {
+                    parentMessageId: runningExecution.parentMessageId,
+                    isResumed: runningExecution.isResumed,
+                    existingData: runningExecution.existingData,
+                },
                 executionId,
                 spanRecorder: this.spanRecorder,
                 executionRef,
@@ -560,6 +708,31 @@ export class WorkerRunner {
             } as TraceSpan);
         } catch (err) {
             // best effort
+        }
+    }
+
+    /**
+     * Host the wait-index sweep on this worker.
+     *
+     * Started unconditionally because the sweeper itself owns the two switches:
+     * pruning defaults to ON (it is garbage collection that nothing else does,
+     * and switching it off with compensation leaks one index entry per lost
+     * reply — the very failure the index exists to bound), compensation defaults
+     * to OFF. It no-ops if both are disabled.
+     *
+     * Fail-soft: a worker must still come up if its sweeper cannot.
+     */
+    private startWaitSweeper(): void {
+        if (this.waitSweeper) return;
+        try {
+            this.waitSweeper = new WaitIndexSweeper(this.redis, {
+                workerId: this.worker.workerId,
+                registry: this.worker.registry,
+            });
+            this.waitSweeper.start();
+        } catch (err) {
+            console.warn(`[${this.worker.workerId}] Failed to start the wait-index sweeper:`, err);
+            this.waitSweeper = null;
         }
     }
 

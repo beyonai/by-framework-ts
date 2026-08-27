@@ -28,6 +28,12 @@ export interface CallAgentPublishInput {
     readonly availabilityTimeoutMs?: number;
     readonly region?: string;
     readonly priority?: number;
+    /**
+     * How long the caller may stay suspended waiting for the reply before the
+     * liveness sweep resolves it. Only meaningful when waitForReply is true;
+     * defaults to DEFAULT_REPLY_TIMEOUT_MS.
+     */
+    readonly replyTimeoutMs?: number;
     /** Langfuse parent observation ID to nest this sub-agent under the caller's task span. */
     readonly langfuseParentObservationId?: string;
 }
