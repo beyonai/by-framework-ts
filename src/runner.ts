@@ -7,12 +7,16 @@ import {
     QueueNames,
     ConsumerGroups,
     STREAM_READ_LAST_ID,
+    RegistryKeys,
     LOOP_LAG_PROBE_MS,
     LOOP_LAG_UNHEALTHY_MS,
     RENEW_STALENESS_RATIO,
     DEGRADED_RECOVERY_CHECKS,
     DEGRADED_MAX_MS,
     MIN_RENEWALS_PER_LEASE,
+    ORPHAN_RECLAIM_BATCH,
+    ORPHAN_RECLAIM_LEASE_MULTIPLE,
+    ORPHAN_RECLAIM_EVERY_N_POLLS,
 } from './constants';
 import { HeartbeatConfigError } from './exceptions';
 import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand, ResumeCommand, ResumeWorkerCommand, SuspendWorkerCommand, commandFromDict } from './protocol/commands';
@@ -112,6 +116,16 @@ export class WorkerRunner {
     // Round-robin cursor for poll()'s phase-two blocking read, so no
     // agent_type is permanently starved of the blocking slot.
     private primaryCursor: number = 0;
+    /**
+     * How long a message must sit unacknowledged before its owner is even
+     * considered dead. Derived from the lease TTL: a worker that missed every
+     * renewal for this long has definitively lost its lease, so the liveness
+     * check that follows is reading a settled state rather than a race.
+     */
+    private readonly orphanReclaimIdleMs: number =
+        RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS * 1000 * ORPHAN_RECLAIM_LEASE_MULTIPLE;
+    /** Cycles left before the next orphan sweep; reclaim is rare, polling is not. */
+    private reclaimCountdown: number = 0;
     // Background pass over due wait-index entries. Hosted by every worker (no
     // leader election — shards are claimed opportunistically), so the mechanism
     // inherits the fleet's availability. Started in initialize(), stopped in
@@ -536,10 +550,81 @@ export class WorkerRunner {
         const firstResults = this.parseXreadgroupBatches(firstPass);
         if (firstResults.length > 0) return firstResults;
 
+        // Nothing new to do: a good moment to check for work a dead worker
+        // abandoned. Rate-limited because XPENDING per agent_type per poll
+        // would be constant traffic for an event that is rare.
+        if (--this.reclaimCountdown <= 0) {
+            this.reclaimCountdown = ORPHAN_RECLAIM_EVERY_N_POLLS;
+            const reclaimed = await this.reclaimOrphanedMessages();
+            if (reclaimed.length > 0) return reclaimed;
+        }
+
         const primary = streamNames[this.primaryCursor % streamNames.length];
         this.primaryCursor++;
         const blocked = await this.readStream(primary, count, block);
         return this.parseXreadgroupBatches([blocked]);
+    }
+
+    /**
+     * Take over messages a dead worker left unacknowledged.
+     *
+     * A worker that dies inside handleMessage leaves its message in the
+     * consumer group's pending list, owned by a consumer that will never ack
+     * it. Nothing else reclaims it: the caller's wait sweep can eventually
+     * compensate the *caller*, but the sub-task itself would simply never run.
+     *
+     * XPENDING first rather than XAUTOCLAIM, because the consumer name is the
+     * worker id — which means the pending list tells us exactly whose message
+     * this is, and the presence lease tells us whether that worker is still
+     * alive. Claiming in bulk would have to guess from idle time alone, and a
+     * worker that is merely slow would have its in-flight work executed twice.
+     *
+     * Reclaimed messages go through the normal path, so the execution record's
+     * terminal-state check still guards against re-running finished work.
+     */
+    private async reclaimOrphanedMessages(): Promise<
+        { streamName: string; msgId: string; data: GatewayCommand }[]
+    > {
+        const reclaimed: { streamName: string; msgId: string; data: GatewayCommand }[] = [];
+        const minIdleMs = this.orphanReclaimIdleMs;
+
+        for (const agentType of this.worker.getAgentTypes()) {
+            if (this.deniedAgentTypes.has(agentType)) continue;
+            const streamName = QueueNames.ctrl_stream(agentType);
+            try {
+                const pending = (await (this.redis.xpending as any)(
+                    streamName, this.groupName, '-', '+', ORPHAN_RECLAIM_BATCH
+                )) as Array<[string, string, number, number]> | null;
+                if (!pending?.length) continue;
+
+                const claimable: string[] = [];
+                for (const [msgId, consumer, idleMs] of pending) {
+                    if (consumer === this.consumerName) continue; // Ours, still in flight.
+                    if (Number(idleMs) < minIdleMs) continue;     // Too soon to call it dead.
+                    if (await this.worker.registry.isWorkerOnline(String(consumer))) continue;
+                    claimable.push(String(msgId));
+                }
+                if (!claimable.length) continue;
+
+                console.warn(
+                    `[${this.worker.workerId}] Reclaiming ${claimable.length} orphaned message(s) ` +
+                    `from ${streamName} left by workers that are no longer alive`
+                );
+                const claimed = (await (this.redis.xclaim as any)(
+                    streamName, this.groupName, this.consumerName, minIdleMs, ...claimable
+                )) as [string, string[]][] | null;
+
+                for (const entry of claimed || []) {
+                    const parsed = this.parseStreamEntry(streamName, entry);
+                    if (parsed) reclaimed.push(parsed);
+                }
+            } catch (err) {
+                // Best effort: reclaim is a recovery path, and failing it must
+                // not stop this worker from consuming new messages.
+                console.warn(`[${this.worker.workerId}] Orphan reclaim failed for ${streamName}:`, err);
+            }
+        }
+        return reclaimed;
     }
 
     private async readStream(
@@ -559,6 +644,28 @@ export class WorkerRunner {
             [string, [string, string[]][]][] | null;
     }
 
+    /** Decode one `[msgId, [field, value, ...]]` entry, or null if unusable. */
+    private parseStreamEntry(
+        streamName: string,
+        entry: [string, string[]]
+    ): { streamName: string; msgId: string; data: GatewayCommand } | null {
+        const [msgId, fieldValues] = entry;
+        let dataStr = '';
+        for (let i = 0; i < fieldValues.length; i += 2) {
+            if (fieldValues[i] === 'data') {
+                dataStr = fieldValues[i + 1];
+                break;
+            }
+        }
+        if (!dataStr) return null;
+        try {
+            return { streamName, msgId, data: commandFromDict(JSON.parse(dataStr)) };
+        } catch (err) {
+            console.error(`Failed to parse message JSON: ${dataStr}`, err);
+            return null;
+        }
+    }
+
     private parseXreadgroupBatches(
         batches: ([string, [string, string[]][]][] | null)[]
     ): { streamName: string; msgId: string; data: GatewayCommand }[] {
@@ -566,23 +673,9 @@ export class WorkerRunner {
         for (const batch of batches) {
             if (!batch) continue;
             for (const [streamName, messages] of batch) {
-                for (const [msgId, fieldValues] of messages) {
-                    let dataStr = '';
-                    for (let i = 0; i < fieldValues.length; i += 2) {
-                        if (fieldValues[i] === 'data') {
-                            dataStr = fieldValues[i + 1];
-                            break;
-                        }
-                    }
-
-                    if (dataStr) {
-                        try {
-                            const data = commandFromDict(JSON.parse(dataStr));
-                            results.push({ streamName, msgId, data });
-                        } catch (err) {
-                            console.error(`Failed to parse message JSON: ${dataStr}`, err);
-                        }
-                    }
+                for (const entry of messages) {
+                    const parsed = this.parseStreamEntry(streamName, entry);
+                    if (parsed) results.push(parsed);
                 }
             }
         }
