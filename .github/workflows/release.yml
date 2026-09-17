@@ -111,6 +111,30 @@ jobs:
             console.log("Tarball has " + files.length + " file(s), including " + required.join(" and "));
           '
 
+      # npm validates --provenance against package.json's repository.url and
+      # rejects the publish with a 422 when they disagree — but only AFTER it
+      # has already written a sigstore transparency-log entry for a release
+      # that never happened. Checking here fails a step earlier, without that
+      # side effect, and with an error that names the actual problem.
+      - name: Verify provenance prerequisites
+        if: steps.check.outputs.published == 'false'
+        run: |
+          node -e '
+            const pkg = require("./package.json");
+            const repository = pkg.repository;
+            const url = (typeof repository === "string" ? repository : repository && repository.url) || "";
+            const expected = process.env.GITHUB_REPOSITORY;
+            if (!url) {
+              console.error("package.json has no repository.url; --provenance requires one matching " + expected);
+              process.exit(1);
+            }
+            if (!url.includes(expected)) {
+              console.error("package.json repository.url (" + url + ") does not match " + expected);
+              process.exit(1);
+            }
+            console.log("repository.url " + url + " matches " + expected);
+          '
+
       - name: Publish to npm
         if: steps.check.outputs.published == 'false' && inputs.dry_run != true
         # `--provenance` attaches a signed attestation linking this tarball to
