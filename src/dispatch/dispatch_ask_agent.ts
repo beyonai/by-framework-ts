@@ -1,5 +1,5 @@
 import type { Redis } from 'ioredis';
-import { DEFAULT_REPLY_TIMEOUT_MS, QueueNames } from '../constants';
+import { DEFAULT_REPLY_TIMEOUT_MS, QueueNames, RegistryKeys } from '../constants';
 import { registerWait } from '../liveness/wait_registration';
 import { AgentState } from '../protocol/agent_state';
 import { buildAskAgentPublishArtifacts, resolveCallAgentPublishIds, retargetAskAgentCommand } from './ask_agent_build';
@@ -11,6 +11,26 @@ import type { CallAgentPublishInput, CallAgentPublishResult } from './types';
 import { AvailabilityRouter, AvailabilityStatus, RoutePolicy } from '../availability';
 
 const AGENT_TYPE_NOT_FOUND = 'AGENT_TYPE_NOT_FOUND';
+
+/**
+ * Cap a caller-supplied availability timeout at the inline-wait bound.
+ *
+ * The wakeup wait runs inside task processing and holds a runner in-flight
+ * slot for its whole duration, so an unbounded value trades this worker's
+ * throughput for a longer shot at a wakeup that is already unlikely to arrive
+ * — and a saturated runner is what makes a busy worker look stalled to the
+ * health check. Clamping rather than rejecting keeps an existing public
+ * parameter working; the warning makes the effective value visible.
+ */
+function clampInlineWait(requested: number | undefined): number | undefined {
+    if (requested === undefined) return undefined;
+    const max = RegistryKeys.WORKER_MAX_INLINE_WAIT_MS;
+    if (requested <= max) return requested;
+    console.warn(
+        `[dispatch] availabilityTimeoutMs ${requested}ms exceeds the inline wait bound; using ${max}ms`
+    );
+    return max;
+}
 
 /**
  * Publish-side pipeline: optional online probe → build AskAgent → init execution → XADD ctrl stream.
@@ -169,7 +189,7 @@ export function createRedisCallAgentDeps(params: {
                     source: input.sourceAgentType, targetAgentType: input.targetAgentType,
                     userCode: input.userCode, region: input.region, priority: input.priority,
                     policy: input.routePolicy || RoutePolicy.FAIL_FAST,
-                    timeoutMs: input.availabilityTimeoutMs, commandPayload,
+                    timeoutMs: clampInlineWait(input.availabilityTimeoutMs), commandPayload,
                     metadata: { ...(input.metadata || {}) },
                 });
             },

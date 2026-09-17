@@ -64,6 +64,22 @@ function workerScanPattern(v1Prefix: string, v2Field: string): string {
   return `${v1Prefix}*`;
 }
 
+/**
+ * Read a positive number from an env var, falling back to `fallback` when it is
+ * unset, unparseable, or non-positive.
+ *
+ * Silently ignoring a bad value here is deliberate: these feed timers, and a
+ * NaN interval fails in a far more confusing way than a default one. Config
+ * that is parseable but incoherent (interval too close to the TTL) is caught by
+ * assertHeartbeatTiming() at startup instead.
+ */
+function positiveNumberFromEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
 /** Extract worker_id from a key returned by scanning with workerScanPattern(v1Prefix, v2Field). */
 function workerIdFromScannedKey(key: string, v1Prefix: string, v2Field: string): string | null {
   if (getKeySchemaVersion() === 'v2') {
@@ -230,11 +246,36 @@ export class RegistryKeys {
   /** Default heartbeat interval (10 seconds) */
   static SD_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10;
 
-  /** Worker default heartbeat interval (seconds) */
-  static WORKER_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5;
+  /**
+   * Worker default heartbeat interval (seconds).
+   *
+   * Resolved per read rather than at module load so a deployment can set
+   * `BYAI_WORKER_HEARTBEAT_INTERVAL_SECONDS` without depending on import order.
+   * An unusable value falls back to the default rather than propagating NaN
+   * into a timer; `assertHeartbeatTiming()` is where a misconfiguration is
+   * reported.
+   */
+  static get WORKER_DEFAULT_HEARTBEAT_INTERVAL_SECONDS(): number {
+    return positiveNumberFromEnv(process.env.BYAI_WORKER_HEARTBEAT_INTERVAL_SECONDS, 5);
+  }
 
-  /** Worker online lease TTL (seconds) */
-  static WORKER_DEFAULT_LEASE_TTL_SECONDS = 15;
+  /** Worker online lease TTL (seconds). See the interval getter above. */
+  static get WORKER_DEFAULT_LEASE_TTL_SECONDS(): number {
+    return positiveNumberFromEnv(process.env.BYAI_WORKER_LEASE_TTL_SECONDS, 15);
+  }
+
+  /**
+   * Upper bound for an inline wait — one that blocks inside task processing and
+   * holds a runner in-flight slot (today: AvailabilityRouter's wakeup wait).
+   *
+   * A slot held for the caller's full availability timeout is a slot not
+   * consuming, and a saturated runner is what makes a busy worker look stalled.
+   * Derived from the lease TTL rather than written as a literal so the two
+   * cannot drift.
+   */
+  static get WORKER_MAX_INLINE_WAIT_MS(): number {
+    return (RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS * 1000) / 3;
+  }
 
   /**
    * Worker online lease key. Value stores presence token and last_seen.
@@ -581,6 +622,37 @@ export enum LivenessErrorCode {
    */
   REPLY_LOST_RECOVERED = 'REPLY_LOST_RECOVERED',
 }
+
+/**
+ * Renewals that must fit inside one lease TTL.
+ *
+ * At 3, two consecutive renewals can fail before the lease expires. At 1 the
+ * first blip drops the worker out of routing, which is exactly the class of
+ * silent eviction this ratio exists to prevent.
+ */
+export const MIN_RENEWALS_PER_LEASE = 3;
+
+// --- Worker Health Constants ---
+/** How often the runner samples event-loop delay (ms). */
+export const LOOP_LAG_PROBE_MS = 1000;
+/**
+ * Event-loop delay that counts as unhealthy (ms).
+ *
+ * Note the probe can only observe delay it survives: code that blocks the loop
+ * outright also blocks this timer, so a truly wedged loop is detected after it
+ * recovers, not during. That is still strictly better than the silence before.
+ */
+export const LOOP_LAG_UNHEALTHY_MS = 5000;
+/**
+ * Fraction of the lease TTL that may elapse without a successful renewal before
+ * the worker is considered unhealthy. Below 1 so the signal fires while the
+ * lease is still alive rather than after routing has already dropped us.
+ */
+export const RENEW_STALENESS_RATIO = 0.8;
+/** Consecutive healthy checks required to leave the degraded state. */
+export const DEGRADED_RECOVERY_CHECKS = 3;
+/** How long a runner may stay degraded before it is treated as fatal (ms). */
+export const DEGRADED_MAX_MS = 120_000;
 
 // --- Filesystem Constants ---
 export const DEFAULT_WORKSPACE_DIR = 'workspace';

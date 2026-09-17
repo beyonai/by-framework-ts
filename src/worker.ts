@@ -20,7 +20,7 @@ import {
 import { flushPendingGroupReplies } from './liveness/wait_reply';
 import { mergeResumeMetadata } from './resume_metadata';
 import { WorkerRegistry } from './registry';
-import { WorkerHeartbeat } from './heartbeat';
+import { WorkerHeartbeat, type HeartbeatObservers } from './heartbeat';
 import { MessageHeader } from './protocol/message_header';
 import { JsonValue, ProcessCommandResult, WireContent, normalizeProcessResult, AgentTaskResult } from './protocol/results';
 import { PluginRegistry } from './extensions/registry';
@@ -110,7 +110,8 @@ export abstract class GatewayWorker {
         lifecycleCallback?: (lifecycle: string) => void,
         denylistRefresh?: (denied: Set<string>) => void,
         healthCheck?: () => boolean,
-        onUnhealthy?: () => void
+        onUnhealthy?: () => void,
+        observers: HeartbeatObservers = {}
     ): Promise<void> {
         await this.pluginRegistry.onWorkerStartup(this);
         this._heartbeat = new WorkerHeartbeat(
@@ -123,7 +124,8 @@ export abstract class GatewayWorker {
             lifecycleCallback,
             denylistRefresh,
             healthCheck,
-            onUnhealthy
+            onUnhealthy,
+            observers
         );
         await this._heartbeat.start();
     }
