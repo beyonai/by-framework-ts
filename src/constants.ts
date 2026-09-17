@@ -567,6 +567,26 @@ export const WAIT_RENEW_MAX_MULTIPLE = 3;
  */
 export const WAIT_RENEW_ORIGIN_TTL_SECONDS = TASK_GROUP_TTL_SECONDS;
 /**
+ * error_code for a reply whose task group tracker no longer exists.
+ *
+ * Distinct from the LivenessErrorCode family: those describe a sub-task that
+ * went wrong, this one describes the group's bookkeeping outliving its TTL
+ * while replies were still arriving.
+ */
+export const TASK_GROUP_EXPIRED = 'TASK_GROUP_EXPIRED';
+
+// --- Orphaned Message Reclaim Constants ---
+/**
+ * Lease TTLs a message must sit unacknowledged before its owner counts as
+ * dead. Well past the point where a live worker would have renewed, so the
+ * liveness check that follows reads a settled state rather than a race.
+ */
+export const ORPHAN_RECLAIM_LEASE_MULTIPLE = 4;
+/** Most pending entries inspected per stream per sweep. */
+export const ORPHAN_RECLAIM_BATCH = 50;
+/** Idle polls between orphan sweeps. Reclaim is rare; polling is not. */
+export const ORPHAN_RECLAIM_EVERY_N_POLLS = 20;
+/**
  * How long RegistryKeys.wait_consumed() remembers that a wait was already
  * resolved, i.e. how far apart two copies of the same reply may be and still be
  * recognized as duplicates.

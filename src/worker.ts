@@ -15,6 +15,9 @@ import {
     TASK_GROUP_FIELD_ABORTED,
     TASK_GROUP_FIELD_TOTAL,
     TASK_GROUP_FIELD_COMPLETED,
+    TASK_GROUP_EXPIRED,
+    MAX_RETRY_COUNT,
+    FIRST_RETRY_WAIT_SECONDS,
     singleCallTaskGroupId,
 } from './constants';
 import { flushPendingGroupReplies } from './liveness/wait_reply';
@@ -230,7 +233,29 @@ export abstract class GatewayWorker {
                     const groupKey = QueueNames.task_group(command.header.taskGroupId);
                     const resultsKey = QueueNames.task_group_results(command.header.taskGroupId);
                     const totalStr = await this.redis.hget(groupKey, TASK_GROUP_FIELD_TOTAL);
-                    if (totalStr !== null) {
+                    if (totalStr === null) {
+                        // The group tracker is gone — expired past
+                        // TASK_GROUP_TTL_SECONDS, or never written. Falling
+                        // through would treat this sibling as a lone reply and
+                        // resume the caller with one sub-task's payload where
+                        // the aggregate belongs, which reads as a plausible
+                        // answer rather than a failure. Say so instead.
+                        console.error(
+                            `[${this.workerId}] TaskGroup ${command.header.taskGroupId} no longer exists ` +
+                            `(expired or never created); refusing to resume the caller with a single ` +
+                            `sibling's result (sub-task=${command.header.parentMessageId})`
+                        );
+                        return new AgentTaskResult({
+                            status: AgentState.FAILED,
+                            replyData: {
+                                error: `Task group ${command.header.taskGroupId} expired before all replies arrived`,
+                                error_code: TASK_GROUP_EXPIRED,
+                                task_group_id: command.header.taskGroupId,
+                                child_message_id: command.header.parentMessageId,
+                            },
+                        });
+                    }
+                    {
                         if (await this.redis.hget(groupKey, TASK_GROUP_FIELD_ABORTED)) {
                             // The fan-out threw partway through, so this caller
                             // execution was already failed. Counting a late
@@ -630,12 +655,47 @@ export abstract class GatewayWorker {
 
         await this.persistSingleCallResult(header, callbackMsg);
 
-        await this.redis.xadd(
+        // Retry before giving up. The success path propagates a failure here
+        // (leaving the message unacked, so it is retried or reclaimed), but the
+        // cancel and failure paths only log — so on those, a single transient
+        // Redis blip used to lose the caller's wake-up silently and leave it
+        // suspended until the wait sweep compensated it minutes later.
+        await this.xaddWithRetry(
             QueueNames.ctrl_stream(callbackMsg.header.targetAgentType),
-            '*',
-            'data',
-            JSON.stringify(callbackMsg.toDict())
+            JSON.stringify(callbackMsg.toDict()),
+            `agent return for caller=${callbackMsg.header.messageId}`
         );
+    }
+
+    /**
+     * XADD with bounded retries and linear backoff.
+     *
+     * Deliberately few and short: this runs while a task holds an in-flight
+     * slot, and a reply that cannot be delivered in a couple of seconds is
+     * better handed to the wait sweeper — which exists precisely for the case
+     * where a reply never lands — than retried until the worker is starved.
+     */
+    private async xaddWithRetry(stream: string, payload: string, description: string): Promise<void> {
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= MAX_RETRY_COUNT; attempt++) {
+            try {
+                await this.redis.xadd(stream, '*', 'data', payload);
+                if (attempt > 1) {
+                    console.warn(`[${this.workerId}] Delivered ${description} on attempt ${attempt}`);
+                }
+                return;
+            } catch (error) {
+                lastError = error;
+                console.warn(
+                    `[${this.workerId}] Failed to deliver ${description} (attempt ${attempt}/${MAX_RETRY_COUNT}):`,
+                    error
+                );
+                if (attempt < MAX_RETRY_COUNT) {
+                    await new Promise(resolve => setTimeout(resolve, FIRST_RETRY_WAIT_SECONDS * 1000 * attempt));
+                }
+            }
+        }
+        throw lastError;
     }
 
     /**
