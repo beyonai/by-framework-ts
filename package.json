@@ -5,6 +5,10 @@
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "type": "commonjs",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/beyonai/by-framework-ts.git"
+    },
     "files": [
         "dist",
         "examples",
