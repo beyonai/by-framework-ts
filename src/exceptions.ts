@@ -166,6 +166,13 @@ export class WorkerRegistryNotSetError extends GatewaySDKError {
   }
 }
 
+export class HeartbeatConfigError extends GatewaySDKError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HeartbeatConfigError';
+  }
+}
+
 // === Command Validation Exceptions ===
 
 export class CommandValidationError extends GatewaySDKError {

@@ -3,7 +3,18 @@ import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { getRedis, createRedis } from './redis_client';
 import { GatewayWorker } from './worker';
-import { QueueNames, ConsumerGroups, STREAM_READ_LAST_ID } from './constants';
+import {
+    QueueNames,
+    ConsumerGroups,
+    STREAM_READ_LAST_ID,
+    LOOP_LAG_PROBE_MS,
+    LOOP_LAG_UNHEALTHY_MS,
+    RENEW_STALENESS_RATIO,
+    DEGRADED_RECOVERY_CHECKS,
+    DEGRADED_MAX_MS,
+    MIN_RENEWALS_PER_LEASE,
+} from './constants';
+import { HeartbeatConfigError } from './exceptions';
 import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand, ResumeCommand, ResumeWorkerCommand, SuspendWorkerCommand, commandFromDict } from './protocol/commands';
 import { WorkerRegistry } from './registry';
 import { HistoryProvider } from './history';
@@ -11,6 +22,13 @@ import { AgentState } from './protocol/agent_state';
 import { consumeWaitEntry, emitOrphanedReply } from './liveness/wait_gate';
 import { WaitIndexSweeper } from './liveness/wait_sweeper';
 import { SpanRecorder, TraceSpan } from './trace/span_recorder';
+
+/**
+ * normal   — consuming.
+ * degraded — not taking new work, lease still renewed, recoverable.
+ * fatal    — stop: heartbeat ends and the runner shuts down.
+ */
+export type HealthState = 'normal' | 'degraded' | 'fatal';
 
 interface RunningExecution {
     executionId: string;
@@ -65,9 +83,32 @@ export class WorkerRunner {
     private evictForce: boolean = false;
     // In-memory cache of agent_types denied for this worker.
     private deniedAgentTypes: Set<string> = new Set();
-    // Consumer loop liveness tracking for health_check.
+    // Tasks currently being processed. Held as a field (rather than a local in
+    // start()) so health judgement can tell a saturated worker from a stalled one.
+    private readonly inFlight = new Set<Promise<void>>();
+    // Health signals. See isHealthy() for how they combine.
+    /** Last time the consume loop made progress — the scheduler is alive. */
     private lastConsumerTick: number = 0;
+    /** Last time the heartbeat successfully extended the presence lease. */
+    private lastRenewOkAt: number = 0;
+    /**
+     * Worst event-loop delay seen since the last health evaluation.
+     *
+     * A peak rather than the latest sample: the probe fires every
+     * LOOP_LAG_PROBE_MS but health is evaluated once per heartbeat interval, so
+     * an instantaneous reading would miss any stall that ended before the check
+     * — which is most of them. Consumed (reset) by evaluateHealth().
+     */
+    private peakLoopLagMs: number = 0;
+    private lagTimer: NodeJS.Timeout | null = null;
     private readonly consumerHealthTimeoutMs: number = 30_000;
+    // Health state, deliberately separate from adminLifecycle: an operator
+    // suspending a worker and a worker being unwell are independent facts, and
+    // folding them together would let an admin resume silently clear a real
+    // health problem.
+    private healthState: HealthState = 'normal';
+    private degradedSince: number = 0;
+    private healthyStreak: number = 0;
     // Round-robin cursor for poll()'s phase-two blocking read, so no
     // agent_type is permanently starved of the blocking slot.
     private primaryCursor: number = 0;
@@ -233,11 +274,150 @@ export class WorkerRunner {
     }
 
     /**
+     * Sample event-loop delay so a thread hogged by synchronous work is at least
+     * visible. `unref()` keeps the probe from holding the process open.
+     */
+    private startEventLoopProbe(): void {
+        if (this.lagTimer) return;
+        let expected = Date.now() + LOOP_LAG_PROBE_MS;
+        this.lagTimer = setInterval(() => {
+            const now = Date.now();
+            this.peakLoopLagMs = Math.max(this.peakLoopLagMs, now - expected);
+            expected = now + LOOP_LAG_PROBE_MS;
+        }, LOOP_LAG_PROBE_MS);
+        this.lagTimer.unref?.();
+    }
+
+    private stopEventLoopProbe(): void {
+        if (this.lagTimer) {
+            clearInterval(this.lagTimer);
+            this.lagTimer = null;
+        }
+        this.peakLoopLagMs = 0;
+    }
+
+    /**
+     * Is this worker able to take on work right now?
+     *
+     * Three independent signals, because the consumer tick alone is wrong in
+     * both directions: it stays fresh while a blocked connection quietly lets
+     * the lease expire, and it goes stale while a saturated worker is perfectly
+     * busy.
+     *
+     * 1. Lease renewal — the only signal that reflects whether routing can still
+     *    see us.
+     * 2. Event-loop delay — synchronous work starving every timer, heartbeat
+     *    included.
+     * 3. Consumer loop — stale ticks mean stalled, *unless* every slot is full,
+     *    which means busy. Whether the tasks themselves progress is a separate
+     *    concern and not judged here.
+     */
+    isHealthy(): boolean {
+        const now = Date.now();
+
+        const leaseTtlMs = this.worker.heartbeatLeaseTtlSeconds * 1000;
+        if (this.lastRenewOkAt && now - this.lastRenewOkAt > leaseTtlMs * RENEW_STALENESS_RATIO) {
+            return false;
+        }
+
+        if (this.peakLoopLagMs > LOOP_LAG_UNHEALTHY_MS) {
+            return false;
+        }
+
+        if (this.lastConsumerTick === 0) return true; // not started yet
+        if (now - this.lastConsumerTick < this.consumerHealthTimeoutMs) return true;
+        return this.inFlight.size >= this.maxConcurrency;
+    }
+
+    /**
+     * Fold the health signals into a state, and report whether the heartbeat
+     * should keep renewing.
+     *
+     * Only `fatal` stops the heartbeat. A `degraded` worker stops taking new
+     * work but keeps its lease alive: it still has in-flight tasks whose replies
+     * need somewhere to land, and dropping out of routing would strand them.
+     *
+     * This matters most for the renewal signal, which is self-referential — it
+     * goes stale precisely when renewal is struggling. Routing it straight to
+     * fatal would turn one network blip into an unrecoverable stop.
+     */
+    private evaluateHealth(): boolean {
+        if (this.healthState === 'fatal') return false;
+
+        const healthy = this.isHealthy();
+        const now = Date.now();
+        // Consume the lag peak: it describes the window just judged, and
+        // carrying it forward would keep failing checks after the stall ended.
+        this.peakLoopLagMs = 0;
+
+        if (healthy) {
+            if (this.healthState === 'degraded') {
+                this.healthyStreak++;
+                if (this.healthyStreak >= DEGRADED_RECOVERY_CHECKS) {
+                    console.log(`[${this.worker.workerId}] Health recovered; resuming consumption`);
+                    this.healthState = 'normal';
+                    this.degradedSince = 0;
+                    this.healthyStreak = 0;
+                }
+            }
+            return true;
+        }
+
+        this.healthyStreak = 0;
+        if (this.healthState === 'normal') {
+            console.warn(`[${this.worker.workerId}] Health degraded; pausing new work while the lease is kept alive`);
+            this.healthState = 'degraded';
+            this.degradedSince = now;
+            return true;
+        }
+
+        if (now - this.degradedSince >= DEGRADED_MAX_MS) {
+            console.error(`[${this.worker.workerId}] Degraded for ${Math.round((now - this.degradedSince) / 1000)}s; escalating to fatal`);
+            this.healthState = 'fatal';
+            return false;
+        }
+        return true;
+    }
+
+    /** Current health state, for tests and diagnostics. */
+    get health(): HealthState {
+        return this.healthState;
+    }
+
+    /**
      * 初始化环境：抢占 worker_id 锁，设置 Stream，启动心跳。
      * 这是“解耦模式”下的首选初始化方式。
      */
+    /**
+     * Reject heartbeat timing that cannot keep a lease alive.
+     *
+     * Checked at startup rather than left to run: an interval too close to the
+     * TTL produces a worker that drops out of routing on the first slow
+     * renewal, which looks like a network problem rather than a config one.
+     */
+    private assertHeartbeatTiming(): void {
+        const intervalSeconds = this.worker.heartbeatInterval;
+        const ttlSeconds = this.worker.heartbeatLeaseTtlSeconds;
+
+        if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
+            throw new HeartbeatConfigError(`Heartbeat interval must be a positive number of seconds, got ${intervalSeconds}`);
+        }
+        if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+            throw new HeartbeatConfigError(`Heartbeat lease TTL must be a positive number of seconds, got ${ttlSeconds}`);
+        }
+        if (intervalSeconds * MIN_RENEWALS_PER_LEASE > ttlSeconds) {
+            throw new HeartbeatConfigError(
+                `Heartbeat interval ${intervalSeconds}s is too long for a ${ttlSeconds}s lease: ` +
+                `at least ${MIN_RENEWALS_PER_LEASE} renewals must fit inside one lease ` +
+                `(need interval <= ${ttlSeconds / MIN_RENEWALS_PER_LEASE}s)`
+            );
+        }
+    }
+
     async initialize(): Promise<void> {
         console.log(`[${this.worker.workerId}] Initializing worker environment...`);
+
+        this.assertHeartbeatTiming();
 
         // 1. 抢占独占锁
         this.lockToken = await this.worker.registry.claimWorkerId(this.worker.workerId);
@@ -247,6 +427,7 @@ export class WorkerRunner {
         await this.setupControlStreams();
 
         // 3. 启动心跳 (wire lifecycle, denylist, and consumer health callbacks)
+        this.startEventLoopProbe();
         await this.worker.startHeartbeat(
             (lifecycle: string) => {
                 this.adminLifecycle = lifecycle;
@@ -254,14 +435,22 @@ export class WorkerRunner {
             (denied: Set<string>) => {
                 this.deniedAgentTypes = denied;
             },
+            () => this.evaluateHealth(),
             () => {
-                // health_check: consumer loop is healthy if it ticked recently
-                if (this.lastConsumerTick === 0) return true; // not started yet
-                return (Date.now() - this.lastConsumerTick) < this.consumerHealthTimeoutMs;
-            },
-            () => {
-                console.error(`[${this.worker.workerId}] Consumer loop unhealthy; stopping runner`);
+                console.error(`[${this.worker.workerId}] Health is fatal; stopping runner`);
                 this.running = false;
+            },
+            {
+                onRenewOk: (at: number) => {
+                    this.lastRenewOkAt = at;
+                },
+                onFenced: () => {
+                    // Another process owns this worker id. Continuing would mean
+                    // two workers consuming under one identity.
+                    console.error(`[${this.worker.workerId}] Fenced by another instance; stopping runner`);
+                    this.healthState = 'fatal';
+                    this.running = false;
+                },
             }
         );
         this.startControlLoop();
@@ -275,6 +464,7 @@ export class WorkerRunner {
      */
     async release(): Promise<void> {
         this.controlLoopRunning = false;
+        this.stopEventLoopProbe();
         // Stopped before the Redis connections close, and awaited: an in-flight
         // pass holds a shard lock, and dropping the connection under it would
         // leave that lock held for its full TTL.
@@ -876,7 +1066,7 @@ export class WorkerRunner {
             console.log(`[${this.worker.workerId}] Runner auto-loop started, waiting for tasks...`);
 
             this.running = true;
-            const inFlight = new Set<Promise<void>>();
+            const inFlight = this.inFlight;
             while (this.running) {
                 try {
                     // Update liveness tick so heartbeat health_check knows the loop is alive
@@ -884,6 +1074,12 @@ export class WorkerRunner {
 
                     // If suspended, pause without consuming
                     if (this.adminLifecycle === 'suspended') {
+                        await new Promise((resolve) => setTimeout(resolve, 1000));
+                        continue;
+                    }
+                    // Degraded: same pause, different reason. Admin intent and
+                    // health are checked separately so neither can mask the other.
+                    if (this.healthState === 'degraded') {
                         await new Promise((resolve) => setTimeout(resolve, 1000));
                         continue;
                     }
@@ -896,6 +1092,17 @@ export class WorkerRunner {
                     const messages = await this.poll();
                     for (const { streamName, msgId, data } of messages) {
                         while (inFlight.size >= this.maxConcurrency) {
+                            // Waiting for a slot is a healthy state — the
+                            // scheduler is alive and doing the only thing it
+                            // can. Without this, a saturated worker whose tasks
+                            // all run longer than consumerHealthTimeoutMs would
+                            // look stalled and evict itself.
+                            //
+                            // This says nothing about whether the tasks
+                            // themselves are progressing; isHealthy() still
+                            // requires saturation before forgiving a stale tick,
+                            // and per-task progress is not tracked here.
+                            this.lastConsumerTick = Date.now();
                             await Promise.race(inFlight);
                         }
 
