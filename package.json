@@ -10,6 +10,9 @@
         "examples",
         "README.md"
     ],
+    "publishConfig": {
+        "access": "public"
+    },
     "scripts": {
         "build": "tsc -p tsconfig.build.json",
         "prepublishOnly": "npm run build",
