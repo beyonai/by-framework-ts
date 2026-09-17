@@ -1,0 +1,154 @@
+name: Release to npm
+
+# Publishes @byclaw/by-framework whenever the version in package.json changes
+# on main — matching how this repo already releases ("chore: 发布版本 X"
+# commits), so nothing new has to be remembered at release time.
+#
+# The job is idempotent by construction: it asks the registry whether this
+# exact version already exists and exits cleanly if it does. That makes a
+# re-run, a rebase, or an unrelated package.json edit a no-op instead of a
+# failed publish, and it is why triggering on every main push is safe.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "package.json"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack, but do not publish"
+        type: boolean
+        default: false
+
+# Never let two releases race: a second push while one is publishing would
+# otherwise both see "not yet published" and both try to claim the version.
+concurrency:
+  group: release-npm
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # Tag the released commit and create the GitHub Release.
+      contents: write
+      # Mint the OIDC token npm uses to attach build provenance.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # No package-lock.json is committed in this repo (see .gitignore), so
+      # neither setup-node's npm cache nor `npm ci` can be used — same
+      # constraint as ci.yml.
+      - name: Install dependencies
+        run: npm install
+
+      - name: Resolve package name and version
+        id: pkg
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved $NAME@$VERSION"
+
+      - name: Check whether this version is already on npm
+        id: check
+        run: |
+          if npm view "${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }} is already on npm; nothing to release."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Deliberately repeated from ci.yml rather than assumed: a manual
+      # workflow_dispatch has no CI run behind it, and a release is the one
+      # place where shipping a broken build is unrecoverable.
+      - name: Typecheck
+        if: steps.check.outputs.published == 'false'
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        if: steps.check.outputs.published == 'false'
+        run: npm test
+
+      # Built explicitly: `npm pack` runs `prepack`, NOT `prepublishOnly`, so
+      # without this the dry run would pack a tarball with no dist/ and prove
+      # nothing about what publish uploads.
+      - name: Build
+        if: steps.check.outputs.published == 'false'
+        run: npm run build
+
+      # package.json points main/types at dist/, but `files` and the build are
+      # independent of each other — nothing else fails if dist/ silently stops
+      # being included. Publishing an importable-looking package with no code
+      # in it is not revertible (npm forbids re-using a version), so assert it
+      # here, where the cost is a failed job.
+      - name: Verify the tarball contains the build output
+        if: steps.check.outputs.published == 'false'
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const [pkg] = require("./pack.json");
+            const files = pkg.files.map(f => f.path);
+            const required = ["dist/index.js", "dist/index.d.ts"];
+            const missing = required.filter(f => !files.includes(f));
+            if (missing.length) {
+              console.error("Missing from the tarball: " + missing.join(", "));
+              console.error("Packed " + files.length + " file(s): " + files.slice(0, 20).join(", "));
+              process.exit(1);
+            }
+            console.log("Tarball has " + files.length + " file(s), including " + required.join(" and "));
+          '
+
+      - name: Publish to npm
+        if: steps.check.outputs.published == 'false' && inputs.dry_run != true
+        # `--provenance` attaches a signed attestation linking this tarball to
+        # this workflow run and commit. Access level comes from package.json's
+        # publishConfig so there is one source of truth for it.
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag the released commit
+        if: steps.check.outputs.published == 'false' && inputs.dry_run != true
+        env:
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Tolerate an existing tag: the publish above already succeeded, and
+          # failing here would report a released version as a failed release.
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Tag $TAG already exists; leaving it alone."
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Create the GitHub Release
+        if: steps.check.outputs.published == 'false' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+          PKG: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists."
+          else
+            # --generate-notes picks the previous tag itself; this repo has no
+            # tags yet, so the first release simply gets notes from the start.
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+          echo "::notice::Published $PKG@$VERSION"
