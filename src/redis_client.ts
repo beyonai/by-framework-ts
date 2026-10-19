@@ -1,6 +1,7 @@
 import Redis, { Cluster, RedisOptions } from 'ioredis';
 import { getKeySchemaVersion } from './constants';
 import { RedisConnectionError } from './exceptions';
+import { resolveRedisPassword } from './redis_password';
 
 let redisInstance: Redis | null = null;
 
@@ -82,7 +83,10 @@ function assertValidClusterNodes(nodes: RedisClusterNode[]): void {
 export function createRedis(options: RedisConnectionConfig = {}): Redis {
     const mode = resolveMode(options);
     const username = options.username || process.env.REDIS_USERNAME;
-    const password = options.password || process.env.REDIS_PASSWORD;
+    // Every password source (options, runWorker's redisPassword, env) reaches
+    // ioredis through here, so {cipher} values are decrypted once, at the last
+    // point before the client sees the password.
+    const password = resolveRedisPassword(options.password || process.env.REDIS_PASSWORD);
     const { mode: _mode, clusterNodes: _clusterNodes, ...redisOptions } = options;
 
     if (mode === 'cluster') {
