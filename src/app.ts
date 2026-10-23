@@ -18,6 +18,7 @@ export interface RunWorkerOptions {
     redisUsername?: string;
     consumerGroup?: string;
     workspaceDir?: string;
+    /** @deprecated Ignored. Message dispatch has no task concurrency cap. */
     maxConcurrency?: number;
     fetchCount?: number;
     redisMaxConnections?: number;
@@ -41,12 +42,10 @@ export async function runWorker(
     WorkerClass: new (...args: any[]) => GatewayWorker,
     options: RunWorkerOptions = {}
 ): Promise<void> {
-    const maxConcurrency =
-        options.maxConcurrency ?? Number(process.env.BYAI_WORKER_CONCURRENCY || 50);
     const fetchCount =
         options.fetchCount ?? Number(process.env.BYAI_WORKER_FETCH_COUNT || 10);
     const redisMaxConnections =
-        options.redisMaxConnections ?? Number(process.env.BYAI_REDIS_MAX_CONNECTIONS || maxConcurrency + 10);
+        options.redisMaxConnections ?? Number(process.env.BYAI_REDIS_MAX_CONNECTIONS || 60);
 
     const redisClient =
         options.redisClient ||
@@ -98,7 +97,6 @@ export async function runWorker(
     const runner = new WorkerRunner(worker, {
         redisClient,
         groupName: options.consumerGroup || 'agent_engines',
-        maxConcurrency,
         fetchCount,
     });
 
