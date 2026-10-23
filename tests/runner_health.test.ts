@@ -54,11 +54,11 @@ describe('WorkerRunner.isHealthy', () => {
         expect(runner.isHealthy()).toBe(true);
     });
 
-    test('a saturated worker with long tasks stays healthy', () => {
+    test('unfinished tasks do not hide a stalled consumer loop', () => {
         const runner = makeRunner(2);
-        // Every slot busy, no task finished for well past the stall timeout.
+        // Dispatch is independent of completion: unfinished work cannot excuse a stale tick.
         setSignals(runner, { tick: Date.now() - 60_000, inFlight: 2, renewOk: Date.now() });
-        expect(runner.isHealthy()).toBe(true);
+        expect(runner.isHealthy()).toBe(false);
     });
 
     test('an idle worker whose loop stopped ticking is unhealthy', () => {

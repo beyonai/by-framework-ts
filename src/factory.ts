@@ -12,6 +12,7 @@ export interface WorkerOptions {
     onTask: (command: GatewayCommand, context: AgentContext) => Promise<any>;
     redisClient?: Redis;
     groupName?: string;
+    /** @deprecated Ignored. Message dispatch has no task concurrency cap. */
     maxConcurrency?: number;
     fetchCount?: number;
     pluginRegistry?: PluginRegistry;
@@ -48,7 +49,6 @@ export function createWorkerRunner(options: WorkerOptions): WorkerRunner {
     return new WorkerRunner(worker, {
         redisClient: runnerRedisClient,
         groupName: options.groupName,
-        maxConcurrency: options.maxConcurrency,
         fetchCount: options.fetchCount,
     });
 }

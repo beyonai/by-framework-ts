@@ -128,7 +128,6 @@ class DemoWorker extends GatewayWorker {
 
 const worker = new DemoWorker('worker-ts-01');
 const runner = new WorkerRunner(worker, {
-    maxConcurrency: 50,
     fetchCount: 10,
 });
 
@@ -251,7 +250,6 @@ Default environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `BYAI_WORKER_CONCURRENCY` | Max worker concurrency, default `50` |
 | `BYAI_WORKER_FETCH_COUNT` | Batch size for fetching tasks, default `10` |
 | `BYAI_REDIS_MAX_CONNECTIONS` | Redis connection pool config (aligned with Python SDK) |
 
@@ -355,7 +353,6 @@ new WorkerRunner(
     options?: {
         redisClient?: Redis;
         groupName?: string;
-        maxConcurrency?: number;
         fetchCount?: number;
     }
 )
@@ -518,3 +515,9 @@ enum EventType {
 - Run `npm test` after modifying routing, Redis behavior, or lifecycle logic.
 - Keep protocol fields in `snake_case` (e.g., `target_agent_type`, `message_id`).
 - Source code uses strict TypeScript, CommonJS output, 4-space indentation, single quotes, and semicolons.
+
+### Asynchronous message admission
+
+The automatic runner dispatches messages without a task concurrency cap. Pending business tasks do not stop the consumer from reading later requests or replies. The legacy `maxConcurrency` options remain accepted for source compatibility but are ignored; `BYAI_WORKER_CONCURRENCY` is no longer read. `fetchCount` controls each stream read batch, not the total number of unfinished tasks.
+
+Blocking Redis reads use dedicated asynchronous connections; idle consumers still wait for messages. ACK, cancellation, lease renewal, health checks, and graceful draining remain active. A stalled consumer is unhealthy even when tasks remain unfinished. Workload-specific admission and model/tool resource limits belong to the application. Uncapped dispatch can increase retained memory and Redis pending entries under sustained overload and does not establish production capacity.

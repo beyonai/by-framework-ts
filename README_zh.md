@@ -128,7 +128,6 @@ class DemoWorker extends GatewayWorker {
 
 const worker = new DemoWorker('worker-ts-01');
 const runner = new WorkerRunner(worker, {
-    maxConcurrency: 50,
     fetchCount: 10,
 });
 
@@ -242,7 +241,6 @@ createRedis(options?: {
 
 | 变量名 | 说明 |
 |--------|------|
-| `BYAI_WORKER_CONCURRENCY` | Worker 最大并发，默认 `50` |
 | `BYAI_WORKER_FETCH_COUNT` | 每次读取任务数，默认 `10` |
 | `BYAI_REDIS_MAX_CONNECTIONS` | 与 Python SDK 对齐的连接数配置语义 |
 
@@ -330,7 +328,6 @@ new WorkerRunner(
     options?: {
         redisClient?: Redis;
         groupName?: string;
-        maxConcurrency?: number;
         fetchCount?: number;
     }
 )
@@ -518,3 +515,9 @@ enum EventType {
 - 修改消息路由、Redis 行为、Worker 生命周期或取消逻辑后，请运行 `npm test`。
 - 协议字段保持 snake_case，例如 `target_agent_type`、`message_id`、`extra_payload`。
 - SDK 源码使用 strict TypeScript、CommonJS 输出、4 空格缩进、单引号和分号。
+
+### 异步消息分发
+
+自动消费循环不再设置任务并发上限，未完成的业务任务不会阻止后续请求或回复被读取。旧 `maxConcurrency` 参数保留类型兼容性，但不再生效；`BYAI_WORKER_CONCURRENCY` 不再读取。`fetchCount` 只控制每个 Stream 的读取批量，不限制未完成任务总数。
+
+Redis 阻塞读取使用独立的异步连接，空闲时仍等待消息。ACK、取消、租约续期、健康检查和正常退出时等待在途任务均保留；消费循环停滞不会因为还有未完成任务而被视为健康。业务准入及模型、工具资源控制由应用负责。持续超载时，无上限分发会增加内存占用和 Redis 待确认记录，不能据此保证生产容量。

@@ -72,7 +72,6 @@ export class WorkerRunner {
     private lockToken: string | null = null;
     private controlTask: Promise<void> | null = null;
     private controlLoopRunning: boolean = false;
-    private maxConcurrency: number;
     private fetchCount: number;
     private activeExecutions = new Map<string, RunningExecution>();
     private messageToExecution = new Map<string, string>();
@@ -87,8 +86,7 @@ export class WorkerRunner {
     private evictForce: boolean = false;
     // In-memory cache of agent_types denied for this worker.
     private deniedAgentTypes: Set<string> = new Set();
-    // Tasks currently being processed. Held as a field (rather than a local in
-    // start()) so health judgement can tell a saturated worker from a stalled one.
+    // Track completion for shutdown without delaying message admission.
     private readonly inFlight = new Set<Promise<void>>();
     // Health signals. See isHealthy() for how they combine.
     /** Last time the consume loop made progress — the scheduler is alive. */
@@ -140,6 +138,7 @@ export class WorkerRunner {
         options: {
             redisClient?: Redis;
             groupName?: string;
+            /** @deprecated Ignored. The runner dispatches without a task concurrency cap. */
             maxConcurrency?: number;
             fetchCount?: number;
             spanRecorder?: SpanRecorder;
@@ -169,7 +168,6 @@ export class WorkerRunner {
         this.ownsControlReadRedis = controlReader.owned;
         this.groupName = options.groupName || this.autoGroupName();
         this.consumerName = this.worker.workerId;
-        this.maxConcurrency = options.maxConcurrency ?? 50;
         this.fetchCount = options.fetchCount ?? 10;
         this.spanRecorder = options.spanRecorder || new SpanRecorder(this.redis);
     }
@@ -313,18 +311,16 @@ export class WorkerRunner {
     /**
      * Is this worker able to take on work right now?
      *
-     * Three independent signals, because the consumer tick alone is wrong in
-     * both directions: it stays fresh while a blocked connection quietly lets
-     * the lease expire, and it goes stale while a saturated worker is perfectly
-     * busy.
+     * Lease renewal, event-loop delay, and consumer progress are independent
+     * signals. Task completion never blocks consumption, so unfinished tasks
+     * cannot excuse a stale consumer tick.
      *
      * 1. Lease renewal — the only signal that reflects whether routing can still
      *    see us.
      * 2. Event-loop delay — synchronous work starving every timer, heartbeat
      *    included.
-     * 3. Consumer loop — stale ticks mean stalled, *unless* every slot is full,
-     *    which means busy. Whether the tasks themselves progress is a separate
-     *    concern and not judged here.
+     * 3. Consumer loop — stale ticks mean stalled. Per-task progress is not
+     *    judged here.
      */
     isHealthy(): boolean {
         const now = Date.now();
@@ -340,7 +336,7 @@ export class WorkerRunner {
 
         if (this.lastConsumerTick === 0) return true; // not started yet
         if (now - this.lastConsumerTick < this.consumerHealthTimeoutMs) return true;
-        return this.inFlight.size >= this.maxConcurrency;
+        return false;
     }
 
     /**
@@ -1184,21 +1180,8 @@ export class WorkerRunner {
 
                     const messages = await this.poll();
                     for (const { streamName, msgId, data } of messages) {
-                        while (inFlight.size >= this.maxConcurrency) {
-                            // Waiting for a slot is a healthy state — the
-                            // scheduler is alive and doing the only thing it
-                            // can. Without this, a saturated worker whose tasks
-                            // all run longer than consumerHealthTimeoutMs would
-                            // look stalled and evict itself.
-                            //
-                            // This says nothing about whether the tasks
-                            // themselves are progressing; isHealthy() still
-                            // requires saturation before forgiving a stale tick,
-                            // and per-task progress is not tracked here.
-                            this.lastConsumerTick = Date.now();
-                            await Promise.race(inFlight);
-                        }
-
+                        // A later message may resume an earlier suspended task.
+                        // Keep reading independently of business-task completion.
                         const task = this.processAndAck(streamName, msgId, data).catch((err) => {
                             console.error(`Error processing message ${msgId}:`, err);
                         }).finally(() => {

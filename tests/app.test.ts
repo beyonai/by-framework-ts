@@ -67,7 +67,7 @@ describe('runWorker', () => {
         process.env = envBackup;
     });
 
-    it('applies env defaults for concurrency/fetch and wires worker/runner', async () => {
+    it('applies fetch defaults and ignores the legacy concurrency environment setting', async () => {
         process.env.BYAI_WORKER_CONCURRENCY = '77';
         process.env.BYAI_WORKER_FETCH_COUNT = '13';
         process.env.BYAI_REDIS_MAX_CONNECTIONS = '123';
@@ -87,10 +87,10 @@ describe('runWorker', () => {
             expect.any(DummyWorker),
             expect.objectContaining({
                 groupName: 'agent_engines',
-                maxConcurrency: 77,
                 fetchCount: 13,
             })
         );
+        expect(WorkerRunner.mock.calls[0][1]).not.toHaveProperty('maxConcurrency');
         expect(closeRedis).toHaveBeenCalledTimes(1);
     });
 
