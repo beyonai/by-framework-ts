@@ -586,6 +586,30 @@ export const ORPHAN_RECLAIM_LEASE_MULTIPLE = 4;
 export const ORPHAN_RECLAIM_BATCH = 50;
 /** Idle polls between orphan sweeps. Reclaim is rare; polling is not. */
 export const ORPHAN_RECLAIM_EVERY_N_POLLS = 20;
+
+// --- Dead Worker Cleanup Constants ---
+/**
+ * Most dead consumers removed per stream per sweep. A first deploy may find
+ * hundreds left by older versions; a few sweeps clear them without making any
+ * single poll() slow.
+ */
+export const DEAD_WORKER_CLEANUP_BATCH = 50;
+
+/**
+ * How long a consumer must have been idle before a dead worker's leftovers
+ * (consumer, control stream, registry membership) are removed.
+ *
+ * BYAI_DEAD_WORKER_CLEANUP_IDLE_SECONDS, default one hour, and never below the
+ * orphan reclaim threshold: cleanup must come after reclaim has had its chance,
+ * because deleting a consumer drops its pending entries.
+ */
+export function deadWorkerCleanupIdleMs(): number {
+  const configuredMs =
+    positiveNumberFromEnv(process.env.BYAI_DEAD_WORKER_CLEANUP_IDLE_SECONDS, 3600) * 1000;
+  const reclaimMs =
+    RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS * 1000 * ORPHAN_RECLAIM_LEASE_MULTIPLE;
+  return Math.max(configuredMs, reclaimMs);
+}
 /**
  * How long RegistryKeys.wait_consumed() remembers that a wait was already
  * resolved, i.e. how far apart two copies of the same reply may be and still be
