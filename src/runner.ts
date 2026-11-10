@@ -17,6 +17,8 @@ import {
     ORPHAN_RECLAIM_BATCH,
     ORPHAN_RECLAIM_LEASE_MULTIPLE,
     ORPHAN_RECLAIM_EVERY_N_POLLS,
+    DEAD_WORKER_CLEANUP_BATCH,
+    deadWorkerCleanupIdleMs,
 } from './constants';
 import { HeartbeatConfigError } from './exceptions';
 import { AskAgentCommand, CancelTaskCommand, EvictWorkerCommand, GatewayCommand, ResumeCommand, ResumeWorkerCommand, SuspendWorkerCommand, commandFromDict } from './protocol/commands';
@@ -124,6 +126,11 @@ export class WorkerRunner {
      */
     private readonly orphanReclaimIdleMs: number =
         RegistryKeys.WORKER_DEFAULT_LEASE_TTL_SECONDS * 1000 * ORPHAN_RECLAIM_LEASE_MULTIPLE;
+    /**
+     * How long a dead worker's consumer must have been idle before its leftovers
+     * are removed. Never below orphanReclaimIdleMs: see deadWorkerCleanupIdleMs().
+     */
+    private readonly deadWorkerCleanupIdleMs: number = deadWorkerCleanupIdleMs();
     /** Cycles left before the next orphan sweep; reclaim is rare, polling is not. */
     private reclaimCountdown: number = 0;
     // Background pass over due wait-index entries. Hosted by every worker (no
@@ -510,6 +517,12 @@ export class WorkerRunner {
             await this.controlTask.catch(() => undefined);
             this.controlTask = null;
         }
+        // Only once we know the id was ours (a same-id successor may already be
+        // running otherwise), and after the control loop has exited so nothing
+        // can recreate the control stream we are about to delete.
+        if (releasedWorkerId) {
+            await this.removeOwnLeftovers();
+        }
         await this.closeRedisConnection(this.controlReadRedis, this.ownsControlReadRedis);
         await this.closeRedisConnection(this.streamReadRedis, this.ownsStreamReadRedis);
         await this.closeRedisConnection(this.redis, this.ownsRedis);
@@ -556,6 +569,10 @@ export class WorkerRunner {
         if (--this.reclaimCountdown <= 0) {
             this.reclaimCountdown = ORPHAN_RECLAIM_EVERY_N_POLLS;
             const reclaimed = await this.reclaimOrphanedMessages();
+            // After reclaim, never before: a consumer is only removed once its
+            // pending list is empty, which for a dead worker means reclaim has
+            // already taken its messages (on this sweep or an earlier one).
+            await this.sweepDeadConsumers();
             if (reclaimed.length > 0) return reclaimed;
         }
 
@@ -625,6 +642,95 @@ export class WorkerRunner {
             }
         }
         return reclaimed;
+    }
+
+    /**
+     * Remove what dead workers left in this runner's consumer group.
+     *
+     * Every worker id that ever read an agent_type stream stays a consumer of
+     * the group forever, and keeps its control stream and registry membership
+     * if it was killed. Workers that start under a fresh id each time (so they
+     * can reclaim their predecessor's messages) make that grow without bound.
+     *
+     * A consumer is removed only when all of these hold: it is not us; it has
+     * nothing pending (XGROUP DELCONSUMER drops pending entries, i.e. would
+     * lose commands — reclaim takes them first); it has been idle for the
+     * cleanup threshold; and its worker holds no presence lease. Liveness is
+     * decided by the lease; idle time is only a second guard.
+     *
+     * Only this runner's own group is touched; other groups on the same stream
+     * belong to other agent_type combinations and are cleaned by their own
+     * workers. Every step is idempotent, so concurrent sweeps need no lock.
+     */
+    private async sweepDeadConsumers(): Promise<void> {
+        for (const agentType of this.worker.getAgentTypes()) {
+            if (this.deniedAgentTypes.has(agentType)) continue;
+            const streamName = QueueNames.ctrl_stream(agentType);
+            try {
+                const consumers = parseXinfoConsumers(
+                    await (this.redis.xinfo as any)('CONSUMERS', streamName, this.groupName)
+                );
+                let removed = 0;
+                for (const consumer of consumers) {
+                    if (removed >= DEAD_WORKER_CLEANUP_BATCH) break;
+                    if (consumer.name === this.consumerName) continue;
+                    if (consumer.pending > 0) continue;
+                    if (consumer.idleMs < this.deadWorkerCleanupIdleMs) continue;
+                    if (await this.worker.registry.isWorkerOnline(consumer.name)) continue;
+
+                    // Registry leftovers first, the consumer last: the consumer
+                    // is what makes a later sweep find this worker again, so if
+                    // forgetWorker fails it must still be there to retry.
+                    await this.worker.registry.forgetWorker(consumer.name);
+                    const dropped = Number(await (this.redis.xgroup as any)(
+                        'DELCONSUMER', streamName, this.groupName, consumer.name
+                    ));
+                    if (dropped > 0) {
+                        // It read a message between our check and the delete.
+                        console.warn(
+                            `[${this.worker.workerId}] Dead consumer ${consumer.name} on ${streamName} ` +
+                            `had ${dropped} pending message(s) when removed`
+                        );
+                    }
+                    removed++;
+                }
+                if (removed > 0) {
+                    console.log(
+                        `[${this.worker.workerId}] Removed ${removed} dead worker(s) from ${streamName}`
+                    );
+                }
+            } catch (err) {
+                // Best effort, like reclaim: a failed cleanup only leaves
+                // garbage for the next sweep.
+                console.warn(`[${this.worker.workerId}] Dead worker cleanup failed for ${streamName}:`, err);
+            }
+        }
+    }
+
+    /**
+     * On graceful shutdown, remove our own consumer from each agent_type group
+     * and our control stream. A consumer that still has pending messages stays:
+     * another worker must be able to see and reclaim them.
+     */
+    private async removeOwnLeftovers(): Promise<void> {
+        for (const agentType of this.worker.getAgentTypes()) {
+            // Denied types included: the consumer may predate the denial.
+            const streamName = QueueNames.ctrl_stream(agentType);
+            try {
+                const pending = (await (this.redis.xpending as any)(
+                    streamName, this.groupName, '-', '+', 1, this.consumerName
+                )) as unknown[] | null;
+                if (pending?.length) continue;
+                await (this.redis.xgroup as any)('DELCONSUMER', streamName, this.groupName, this.consumerName);
+            } catch (err) {
+                console.warn(`[${this.worker.workerId}] Failed to remove consumer from ${streamName}:`, err);
+            }
+        }
+        try {
+            await this.redis.del(QueueNames.worker_ctrl_stream(this.worker.workerId));
+        } catch (err) {
+            console.warn(`[${this.worker.workerId}] Failed to delete control stream:`, err);
+        }
     }
 
     private async readStream(
@@ -1041,18 +1147,29 @@ export class WorkerRunner {
 
     async runControlOnce(block: number = 2000): Promise<GatewayCommand[]> {
         const streamName = QueueNames.worker_ctrl_stream(this.worker.workerId);
-        const result = (await this.controlReadRedis.xreadgroup(
-            'GROUP',
-            this.groupName,
-            this.consumerName,
-            'COUNT',
-            10,
-            'BLOCK',
-            block,
-            'STREAMS',
-            streamName,
-            '>'
-        )) as [string, [string, string[]][]][] | null;
+        let result: [string, [string, string[]][]][] | null;
+        try {
+            result = (await this.controlReadRedis.xreadgroup(
+                'GROUP',
+                this.groupName,
+                this.consumerName,
+                'COUNT',
+                10,
+                'BLOCK',
+                block,
+                'STREAMS',
+                streamName,
+                '>'
+            )) as [string, [string, string[]][]][] | null;
+        } catch (err: any) {
+            // Our control stream was deleted — by another worker's dead-worker
+            // cleanup that saw us offline just before we (re)started under the
+            // same id, or by hand. Recreate it and carry on.
+            if (!String(err?.message ?? '').includes('NOGROUP')) throw err;
+            console.warn(`[${this.worker.workerId}] Control stream ${streamName} was missing; recreating it`);
+            await this.setupControlStreams();
+            return [];
+        }
 
         if (!result) {
             return [];
@@ -1323,4 +1440,32 @@ export class WorkerRunner {
             }
         }
     }
+}
+
+/**
+ * Decode an XINFO CONSUMERS reply: one flat `[field, value, ...]` array per
+ * consumer. Read by field name, not position — Redis 7.2 added `inactive`
+ * between `idle` and the end, and older servers have fewer fields.
+ */
+export function parseXinfoConsumers(
+    reply: unknown
+): Array<{ name: string; pending: number; idleMs: number }> {
+    if (!Array.isArray(reply)) return [];
+    const consumers: Array<{ name: string; pending: number; idleMs: number }> = [];
+    for (const entry of reply) {
+        if (!Array.isArray(entry)) continue;
+        const fields = new Map<string, unknown>();
+        for (let i = 0; i + 1 < entry.length; i += 2) {
+            fields.set(String(entry[i]), entry[i + 1]);
+        }
+        const name = fields.get('name');
+        if (name === undefined || name === null) continue;
+        // Fail closed: an entry without readable pending/idle is skipped, never
+        // treated as "nothing pending" (that would let DELCONSUMER drop work).
+        const pending = Number(fields.get('pending'));
+        const idleMs = Number(fields.get('idle'));
+        if (!Number.isFinite(pending) || !Number.isFinite(idleMs)) continue;
+        consumers.push({ name: String(name), pending, idleMs });
+    }
+    return consumers;
 }

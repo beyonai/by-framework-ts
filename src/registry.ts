@@ -2,7 +2,7 @@ import * as os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { Redis } from 'ioredis';
 import { getRedis } from './redis_client';
-import { RegistryKeys } from './constants';
+import { QueueNames, RegistryKeys } from './constants';
 import { isTerminalState } from './protocol/agent_state';
 
 function getLocalIpAddress(): string {
@@ -240,6 +240,25 @@ export class WorkerRegistry {
         for (const agentType of agentTypes) {
             await this.redis.srem(RegistryKeys.agentTypeMembers(agentType), workerId);
         }
+    }
+
+    /**
+     * Remove what a dead worker left behind: its directed control stream and
+     * its membership. The caller has already established the worker is offline.
+     *
+     * Deliberately kept: the admin lifecycle state (a worker that restarts under
+     * the same id reads it to stay suspended/evicted) and the lease (already
+     * gone). Deleting the control stream loses nothing: suspend/resume/evict are
+     * persisted in the admin state, and a cancel only ever targets executions
+     * held in the dead process's memory.
+     *
+     * If a same-id worker starts in between, each removal heals itself: the
+     * next heartbeat re-registers membership, and the control loop recreates
+     * its group on NOGROUP.
+     */
+    async forgetWorker(workerId: string): Promise<void> {
+        await this.redis.del(QueueNames.worker_ctrl_stream(workerId));
+        await this.unregisterWorkerMembership(workerId);
     }
 
     /**
